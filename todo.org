@@ -1,0 +1,9 @@
+* TODO list: [/]
+  ** [x] st transparency
+  ** [ ] finish dwm
+    *** [ ] default program windows
+    *** [ ] couple other things
+  ** [ ] dmenu
+  ** [ ] emacs
+  ** [ ] slstats/dwmblocks
+  ** [X] file manage

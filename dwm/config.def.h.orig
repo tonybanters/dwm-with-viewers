@@ -1,21 +1,33 @@
 /* See LICENSE file for copyright and license details. */
 
-/* appearance */
+
+/* Catppuccin colors */
+static const char col_bg[]     = "#1E1E2E";  // background
+static const char col_fg[]     = "#CDD6F4";  // foreground
+static const char col_blk[]    = "#45475A";  // black (normal)
+static const char col_red[]    = "#F38BA8";  // red
+static const char col_grn[]    = "#A6E3A1";  // green
+static const char col_ylw[]    = "#F9E2AF";  // yellow
+static const char col_blu[]    = "#89b4fa";  // blue
+static const char col_mag[]    = "#F5C2E7";  // magenta
+static const char col_cyn[]    = "#94E2D5";  // cyan (highlight)
+static const char col_brblk[]  = "#BAC2DE";  // bright black
+                                             //
 static const unsigned int borderpx  = 1;        /* border pixel of windows */
 static const unsigned int snap      = 32;       /* snap pixel */
 static const int showbar            = 1;        /* 0 means no bar */
 static const int topbar             = 1;        /* 0 means bottom bar */
-static const char *fonts[]          = { "monospace:size=10" };
-static const char dmenufont[]       = "monospace:size=10";
-static const char col_gray1[]       = "#222222";
-static const char col_gray2[]       = "#444444";
-static const char col_gray3[]       = "#bbbbbb";
+static const char *fonts[]          = { "UbuntuMono Nerd Font Mono:size=16" };
+static const char dmenufont[]       = "UbuntuMono Nerd Font Mono:size=16";
+static const char col_gray1[]       = "#1E1E2E";
+static const char col_gray2[]       = "#89B4FA";
+static const char col_gray3[]       = "#94E2D5";
 static const char col_gray4[]       = "#eeeeee";
-static const char col_cyan[]        = "#005577";
+static const char col_cyan[]        = "#89B4FA";
 static const char *colors[][3]      = {
 	/*               fg         bg         border   */
-	[SchemeNorm] = { col_gray3, col_gray1, col_gray2 },
-	[SchemeSel]  = { col_gray4, col_cyan,  col_cyan  },
+	[SchemeNorm] = { col_fg,  col_bg,  col_brblk },
+	[SchemeSel]  = { col_cyn, col_bg,  col_mag  },
 };
 
 /* tagging */
@@ -95,7 +107,7 @@ static const Key keys[] = {
 	TAGKEYS(                        XK_7,                      6)
 	TAGKEYS(                        XK_8,                      7)
 	TAGKEYS(                        XK_9,                      8)
-	{ MODKEY|ShiftMask,             XK_q,      quit,           {0} },
+	{ MODKEY|ControlMask,           XK_r,      quit,           {1} }, 
 };
 
 /* button definitions */
