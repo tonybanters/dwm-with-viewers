@@ -778,7 +778,7 @@ highlighturlsline(int row)
 	while ((match = strstrany(linestr + url_start + 1, urlprefixes))) {
 		url_start = match - linestr;
 		for (int c = url_start; c < term.col && strchr(urlchars, linestr[c]); c++) {
-			term.line[row][c].mode |= ATTR_URL;
+			term.line[row][c].mode |= (ATTR_URL | ATTR_UNDERLINE);
             term.line[row][c].decor &= ~(0x7 << 25);
             term.line[row][c].decor |= (UNDERLINE_CURLY << 25); 
 			tsetdirt(row, c);
@@ -793,7 +793,7 @@ unhighlighturlsline(int row)
 	for (int j = 0; j < term.col; j++) {
 		Glyph* g = &term.line[row][j];
 		if (g->mode & ATTR_URL) {
-			g->mode &= ~ATTR_URL;
+			g->mode &= ~(ATTR_URL | ATTR_UNDERLINE);
             g->decor &= ~(0x7 << 25);
 			tsetdirt(row, j);
 		}
