@@ -1,0 +1,37 @@
+#+TITLE: dwm-with-viewers
+#+AUTHOR: Tony
+
+A tiny playground for ricing **dwm** (and friends) together. Try patches, share themes/snippets, and open PRs with your changes.
+
+* Quick Start (Arch Linux)
+Install the deps (beyond ~base~ / ~base-devel~):
+#+begin_src sh
+sudo pacman -S --needed \
+  libx11 libxft libxinerama pkgconf \
+  libxrandr libxrender harfbuzz imlib2 zlib   # (optional; patch-dependent)
+#+end_src
+
+Build (from a component directory, e.g. ~dwm/~ or ~dmenu/~):
+#+begin_src sh
+make clean && make
+# install (system-wide)
+sudo make install
+#+end_src
+
+* Nix Dev Shell (optional)
+If you have Nix, you can hack without touching system packages:
+#+begin_src sh
+# from repo root
+nix develop           # or: nix develop .#dwm / .#dmenu / .#st
+make clean && make
+#+end_src
+The dev shell exports the right ~INCS~/~LIBS~ so upstream Makefiles “just work”.
+
+* Contributing
+- Fork → create a branch → open a PR (screenshots/gifs are welcome).
+- Keep patches focused (one idea per PR).
+- If your change needs extra libs, note the Arch package names and add them to the flake dev shell if relevant.
+
+* Notes
+- Some patches (e.g., harfbuzz, xrender, graphics) require the optional libs listed above.
+- You can test locally before installing by adjusting ~PREFIX~ (e.g., ~make PREFIX=$HOME/.local install~).
