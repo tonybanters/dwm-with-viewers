@@ -5,7 +5,10 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char *font = "JetBrainsMono Nerd Font Mono:pixelsize=18:antialias=true:autohint=true";
+static char *font = "JetBrainsMono Nerd Font:pixelsize=18:antialias=true:autohint=true";
+/* Spare fonts */
+static char *font2[] = { "NotoColorEmoji:pixelsize=16:antialias=true:autohint=true" };
+/* horizontal & vertical padding */
 static int borderpx = 18;
 
 /* How to align the content in the window when the size of the terminal
@@ -65,6 +68,12 @@ static double minlatency = 2;
 static double maxlatency = 33;
 
 /*
+ * Synchronized-Update timeout in ms
+ * https://gitlab.com/gnachman/iterm2/-/wikis/synchronized-updates-spec
+ */
+static uint su_timeout = 200;
+
+/*
  * blinking timeout (set to 0 to disable blinking) for the terminal blinking
  * attribute.
  */
@@ -114,7 +123,10 @@ char *termname = "st-256color";
 unsigned int tabspaces = 8;
 
 /* bg opacity */
-float alpha = 0.7;
+float alpha = 1.0;
+
+/* Background opacity */
+float alpha_def;
 
 /* Terminal colors (16 first used in escape sequence) */
 static const char *colorname[] = {
@@ -154,13 +166,20 @@ unsigned int defaultcs = 258;
 static unsigned int defaultrcs = 258;
 
 /*
- * Default shape of cursor
- * 2: Block ("█")
- * 4: Underline ("_")
- * 6: Bar ("|")
- * 7: Snowman ("☃")
+ * https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h4-Functions-using-CSI-_-ordered-by-the-final-character-lparen-s-rparen:CSI-Ps-SP-q.1D81
+ * Default style of cursor
+ * 0: blinking block
+ * 1: blinking block (default)
+ * 2: steady block ("█")
+ * 3: blinking underline
+ * 4: steady underline ("_")
+ * 5: blinking bar
+ * 6: steady bar ("|")
+ * 7: blinking st cursor
+ * 8: steady st cursor
  */
-static unsigned int cursorshape = 2;
+static unsigned int cursorstyle = 1;
+static Rune stcursor = 0x2603; /* snowman ("☃") */
 
 /*
  * Default columns and rows numbers
@@ -233,25 +252,28 @@ static MouseShortcut mshortcuts[] = {
 };
 
 static Shortcut shortcuts[] = {
-	/* mask                 keysym          function        argument */
-	{ XK_ANY_MOD,           XK_Break,       sendbreak,      {.i =  0} },
-	{ ControlMask,          XK_Print,       toggleprinter,  {.i =  0} },
-	{ ShiftMask,            XK_Print,       printscreen,    {.i =  0} },
-	{ XK_ANY_MOD,           XK_Print,       printsel,       {.i =  0} },
-	{ TERMMOD,              XK_Prior,       zoom,           {.f = +1} },
-	{ TERMMOD,              XK_Next,        zoom,           {.f = -1} },
-	{ TERMMOD,              XK_Home,        zoomreset,      {.f =  0} },
-	{ TERMMOD,              XK_C,           clipcopy,       {.i =  0} },
-	{ TERMMOD,              XK_V,           clippaste,      {.i =  0} },
-	{ TERMMOD,              XK_Y,           selpaste,       {.i =  0} },
-	{ ShiftMask,            XK_Insert,      selpaste,       {.i =  0} },
-	{ TERMMOD,              XK_Num_Lock,    numlock,        {.i =  0} },
-	{ ShiftMask,            XK_Page_Up,     kscrollup,      {.i = -1} },
-    { ShiftMask,            XK_Page_Down,   kscrolldown,    {.i = -1} },
-	{ TERMMOD,              XK_F1,          togglegrdebug,  {.i =  0} },
-	{ TERMMOD,              XK_F6,          dumpgrstate,    {.i =  0} },
-	{ TERMMOD,              XK_F7,          unloadimages,   {.i =  0} },
-	{ TERMMOD,              XK_F8,          toggleimages,   {.i =  0} },
+	/* mask                 keysym              function        argument */
+	{ XK_ANY_MOD,           XK_Break,           sendbreak,      {.i =  0} },
+	{ ControlMask,          XK_Print,           toggleprinter,  {.i =  0} },
+	{ ShiftMask,            XK_Print,           printscreen,    {.i =  0} },
+	{ XK_ANY_MOD,           XK_Print,           printsel,       {.i =  0} },
+	{ TERMMOD,              XK_Prior,           zoom,           {.f = +1} },
+	{ TERMMOD,              XK_Next,            zoom,           {.f = -1} },
+	{ TERMMOD,              XK_Home,            zoomreset,      {.f =  0} },
+	{ TERMMOD,              XK_C,               clipcopy,       {.i =  0} },
+	{ TERMMOD,              XK_V,               clippaste,      {.i =  0} },
+	{ TERMMOD,              XK_Y,               selpaste,       {.i =  0} },
+	{ ShiftMask,            XK_Insert,          selpaste,       {.i =  0} },
+	{ TERMMOD,              XK_Num_Lock,        numlock,        {.i =  0} },
+	{ ShiftMask,            XK_Page_Up,         kscrollup,      {.i = -1} },
+    { ShiftMask,            XK_Page_Down,       kscrolldown,    {.i = -1} },
+	{ TERMMOD,              XK_F1,              togglegrdebug,  {.i =  0} },
+	{ TERMMOD,              XK_F6,              dumpgrstate,    {.i =  0} },
+	{ TERMMOD,              XK_F7,              unloadimages,   {.i =  0} },
+	{ TERMMOD,              XK_F8,              toggleimages,   {.i =  0} },
+    { MODKEY,               XK_bracketleft,     chgalpha,       {.f = -1} }, /* Decrease opacity */
+	{ MODKEY|ShiftMask,     XK_braceright,      chgalpha,       {.f = +1} }, /* Increase opacity */
+	{ MODKEY,               XK_bracketright,    chgalpha,       {.f =  0} }, /* Reset opacity */
 };
 
 /*
@@ -523,3 +545,14 @@ static char ascii_printable[] =
 	" !\"#$%&'()*+,-./0123456789:;<=>?"
 	"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
 	"`abcdefghijklmnopqrstuvwxyz{|}~";
+
+/*
+ * Open urls starting with urlprefixes, contatining urlchars
+ * by passing as ARG1 to urlhandler.
+ */
+char* urlhandler = "xdg-open";
+char urlchars[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	"abcdefghijklmnopqrstuvwxyz"
+	"0123456789-._~:/?#@!$&'*+,;=%";
+char* urlprefixes[] = {"http://", "https://", NULL};
