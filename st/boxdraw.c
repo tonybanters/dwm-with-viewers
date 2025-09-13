@@ -5,7 +5,7 @@
 
 #include <X11/Xft/Xft.h>
 #include "st.h"
-#include "boxdraw_data.h"
+#include "boxdraw.h"
 
 /* Rounded non-negative integers division of n / d  */
 #define DIV(n, d) (((n) + (d) / 2) / (d))
@@ -18,12 +18,26 @@ static Visual *xvis;
 static void drawbox(int, int, int, int, XftColor *, XftColor *, ushort);
 static void drawboxlines(int, int, int, int, XftColor *, ushort);
 
+extern int boxdraw_extra;
+extern int boxdraw_branch;
+extern int boxdraw_branch_thickness;
+extern XWindow xw;
+extern TermWindow win;
+
+#include "boxdraw_branch.h"
+#include "boxdraw_common.h"
+#include "boxdraw_extra.h"
+#include "boxdraw_branch.c"
+#include "boxdraw_common.c"
+#include "boxdraw_extra.c"
+
 /* public API */
 
 void
 boxdraw_xinit(Display *dpy, Colormap cmap, XftDraw *draw, Visual *vis)
 {
 	xdpy = dpy; xcmap = cmap; xd = draw, xvis = vis;
+	initextrasymbols();
 }
 
 int
@@ -31,18 +45,35 @@ isboxdraw(Rune u)
 {
 	Rune block = u & ~0xff;
 	return (boxdraw && block == 0x2500 && boxdata[(uint8_t)u]) ||
-	       (boxdraw_braille && block == 0x2800);
+	       (boxdraw_braille && block == 0x2800) ||
+	       (boxdraw && boxdraw_extra && block == 0x2500 && boxmisc[(uint8_t)u]) ||
+	       (boxdraw && boxdraw_extra && block == 0x1fb00 && boxlegacy[(uint8_t)u]) ||
+	       (boxdraw && boxdraw_extra && u >= 0x1cd00 && u < 0x1cd00 + BE_OCTANTS_LEN) ||
+	       (boxdraw_branch && u >= 0xf5d0 && u < 0xf5d0 + LEN(branchsymbols));
 }
 
 /* the "index" is actually the entire shape data encoded as ushort */
 ushort
 boxdrawindex(const Glyph *g)
 {
+	int bold = (boxdraw_bold && (g->mode & ATTR_BOLD)) ? BDB : 0;
+
 	if (boxdraw_braille && (g->u & ~0xff) == 0x2800)
 		return BRL | (uint8_t)g->u;
-	if (boxdraw_bold && (g->mode & ATTR_BOLD))
-		return BDB | boxdata[(uint8_t)g->u];
-	return boxdata[(uint8_t)g->u];
+
+	if (boxdraw_extra &&  (g->u & ~0xff) == 0x1fb00 && boxlegacy[(uint8_t)g->u])
+		return BDE | (boxlegacy[(uint8_t)g->u] + BE_LEGACY_IDX - 1);
+
+	if (boxdraw_extra && g->u >= 0x1cd00 && g->u < 0x1cd00 + BE_OCTANTS_LEN)
+		return BDE | (g->u - 0x1cd00 + BE_OCTANTS_IDX);
+
+	if (boxdraw_branch && g->u >= 0xf5d0 && g->u < 0xf5d0 + LEN(branchsymbols))
+		return BRS | (g->u - 0xf5d0);
+
+	if (boxdraw_extra && boxmisc[(uint8_t)g->u])
+		return BDE | bold | boxmisc[(uint8_t)g->u];
+
+	return bold | boxdata[(uint8_t)g->u];
 }
 
 void
@@ -59,7 +90,13 @@ void
 drawbox(int x, int y, int w, int h, XftColor *fg, XftColor *bg, ushort bd)
 {
 	ushort cat = bd & ~(BDB | 0xff);  /* mask out bold and data */
-	if (bd & (BDL | BDA)) {
+	if (cat & BDE) {
+		drawextrasymbol(x, y, w, h, fg, bd & 0x3ff, bd & BDB);
+
+	} else if (cat == BRS) {
+		drawbranchsymbol(x, y, w, h, fg, bd & 0xff);
+
+	} else if (bd & (BDL | BDA)) {
 		/* lines (light/double/heavy/arcs) */
 		drawboxlines(x, y, w, h, fg, bd);
 

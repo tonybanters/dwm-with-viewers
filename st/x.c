@@ -85,44 +85,6 @@ static void toggleimages(const Arg *);
 #define TRUEGREEN(x)		(((x) & 0xff00))
 #define TRUEBLUE(x)		(((x) & 0xff) << 8)
 
-typedef XftDraw *Draw;
-typedef XftColor Color;
-typedef XftGlyphFontSpec GlyphFontSpec;
-
-/* Purely graphic info */
-typedef struct {
-	int tw, th; /* tty width and height */
-	int w, h; /* window width and height */
-	int hborderpx, vborderpx;
-	int ch; /* char height */
-	int cw; /* char width  */
-	int mode; /* window state/mode flags */
-	int cursor; /* cursor style */
-} TermWindow;
-
-typedef struct {
-	Display *dpy;
-	Colormap cmap;
-	Window win;
-	Drawable buf;
-	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
-	struct {
-		XIM xim;
-		XIC xic;
-		XPoint spot;
-		XVaNestedList spotlist;
-	} ime;
-	Draw draw;
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	int scr;
-	int isfixed; /* is fixed geometry? */
-	int depth; /* bit depth */
-	int l, t; /* left and top offset */
-	int gm; /* geometry mask */
-} XWindow;
-
 typedef struct {
 	Atom xtarget;
 	char *primary, *clipboard;
@@ -237,9 +199,9 @@ static void (*handler[LASTEvent])(XEvent *) = {
 
 /* Globals */
 static DC dc;
-static XWindow xw;
+XWindow xw;
 static XSelection xsel;
-static TermWindow win;
+TermWindow win;
 static unsigned int mouse_col = 0, mouse_row = 0;
 
 /* Font Ring Cache */
@@ -1466,6 +1428,7 @@ xinit(int cols, int rows)
 	// Initialize the graphics (image display) module.
 	gr_init(xw.dpy, xw.vis, xw.cmap);
     boxdraw_xinit(xw.dpy, xw.cmap, xw.draw, xw.vis);
+
 }
 
 void

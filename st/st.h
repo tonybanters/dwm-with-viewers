@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <X11/Xlib.h>
+#include <X11/Xft/Xft.h>
 
 /* macros */
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -24,6 +26,11 @@
 // This decor color indicates that the fg color should be used. Note that it's
 // not a 24-bit color because the 25-th bit is not set.
 #define DECOR_DEFAULT_COLOR	0x0ffffff
+
+/* Xft type definitions */
+typedef XftDraw *Draw;
+typedef XftColor Color;
+typedef XftGlyphFontSpec GlyphFontSpec;
 
 enum glyph_attribute {
 	ATTR_NULL       = 0,
@@ -101,6 +108,41 @@ typedef union {
 	const void *v;
 	const char *s;
 } Arg;
+
+/* Purely graphic info */
+typedef struct {
+	int tw, th; /* tty width and height */
+	int w, h; /* window width and height */
+	int hborderpx, vborderpx;
+	int ch; /* char height */
+	int cw; /* char width  */
+	int mode; /* window state/mode flags */
+	int cursor; /* cursor style */
+} TermWindow;
+
+typedef struct {
+	Display *dpy;
+	Colormap cmap;
+	Window win;
+	Drawable buf;
+	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
+	struct {
+		XIM xim;
+		XIC xic;
+		XPoint spot;
+		XVaNestedList spotlist;
+	} ime;
+	Draw draw;
+	Visual *vis;
+	XSetWindowAttributes attrs;
+	int scr;
+	int isfixed; /* is fixed geometry? */
+	int depth; /* bit depth */
+	int l, t; /* left and top offset */
+	int gm; /* geometry mask */
+} XWindow;
+
 
 void die(const char *, ...);
 void redraw(void);

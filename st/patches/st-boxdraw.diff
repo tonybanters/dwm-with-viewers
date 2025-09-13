@@ -1,0 +1,2412 @@
+diff --git a/Makefile b/Makefile
+index 15db421..17a1a43 100644
+--- a/Makefile
++++ b/Makefile
+@@ -4,7 +4,7 @@
+ 
+ include config.mk
+ 
+-SRC = st.c x.c
++SRC = st.c x.c boxdraw.c
+ OBJ = $(SRC:.c=.o)
+ 
+ all: st
+@@ -17,6 +17,7 @@ config.h:
+ 
+ st.o: config.h st.h win.h
+ x.o: arg.h config.h st.h win.h
++boxdraw.o: config.h st.h boxdraw.h
+ 
+ $(OBJ): config.h config.mk
+ 
+diff --git a/boxdraw.c b/boxdraw.c
+new file mode 100644
+index 0000000..27433a4
+--- /dev/null
++++ b/boxdraw.c
+@@ -0,0 +1,231 @@
++/*
++ * Copyright 2018 Avi Halachmi (:avih) avihpit@yahoo.com https://github.com/avih
++ * MIT/X Consortium License
++ */
++
++#include <X11/Xft/Xft.h>
++#include "st.h"
++#include "boxdraw.h"
++
++/* Rounded non-negative integers division of n / d  */
++#define DIV(n, d) (((n) + (d) / 2) / (d))
++
++static Display *xdpy;
++static Colormap xcmap;
++static XftDraw *xd;
++static Visual *xvis;
++
++static void drawbox(int, int, int, int, XftColor *, XftColor *, ushort);
++static void drawboxlines(int, int, int, int, XftColor *, ushort);
++
++extern int boxdraw_extra;
++extern int boxdraw_branch;
++extern int boxdraw_branch_thickness;
++extern XWindow xw;
++extern TermWindow win;
++
++#include "boxdraw_branch.h"
++#include "boxdraw_common.h"
++#include "boxdraw_extra.h"
++#include "boxdraw_branch.c"
++#include "boxdraw_common.c"
++#include "boxdraw_extra.c"
++
++/* public API */
++
++void
++boxdraw_xinit(Display *dpy, Colormap cmap, XftDraw *draw, Visual *vis)
++{
++	xdpy = dpy; xcmap = cmap; xd = draw, xvis = vis;
++	initextrasymbols();
++}
++
++int
++isboxdraw(Rune u)
++{
++	Rune block = u & ~0xff;
++	return (boxdraw && block == 0x2500 && boxdata[(uint8_t)u]) ||
++	       (boxdraw_braille && block == 0x2800) ||
++	       (boxdraw && boxdraw_extra && block == 0x2500 && boxmisc[(uint8_t)u]) ||
++	       (boxdraw && boxdraw_extra && block == 0x1fb00 && boxlegacy[(uint8_t)u]) ||
++	       (boxdraw && boxdraw_extra && u >= 0x1cd00 && u < 0x1cd00 + BE_OCTANTS_LEN) ||
++	       (boxdraw_branch && u >= 0xf5d0 && u < 0xf5d0 + LEN(branchsymbols));
++}
++
++/* the "index" is actually the entire shape data encoded as ushort */
++ushort
++boxdrawindex(const Glyph *g)
++{
++	int bold = (boxdraw_bold && (g->mode & ATTR_BOLD)) ? BDB : 0;
++
++	if (boxdraw_braille && (g->u & ~0xff) == 0x2800)
++		return BRL | (uint8_t)g->u;
++
++	if (boxdraw_extra &&  (g->u & ~0xff) == 0x1fb00 && boxlegacy[(uint8_t)g->u])
++		return BDE | (boxlegacy[(uint8_t)g->u] + BE_LEGACY_IDX - 1);
++
++	if (boxdraw_extra && g->u >= 0x1cd00 && g->u < 0x1cd00 + BE_OCTANTS_LEN)
++		return BDE | (g->u - 0x1cd00 + BE_OCTANTS_IDX);
++
++	if (boxdraw_branch && g->u >= 0xf5d0 && g->u < 0xf5d0 + LEN(branchsymbols))
++		return BRS | (g->u - 0xf5d0);
++
++	if (boxdraw_extra && boxmisc[(uint8_t)g->u])
++		return BDE | bold | boxmisc[(uint8_t)g->u];
++
++	return bold | boxdata[(uint8_t)g->u];
++}
++
++void
++drawboxes(int x, int y, int cw, int ch, XftColor *fg, XftColor *bg,
++          const XftGlyphFontSpec *specs, int len)
++{
++	for ( ; len-- > 0; x += cw, specs++)
++		drawbox(x, y, cw, ch, fg, bg, (ushort)specs->glyph);
++}
++
++/* implementation */
++
++void
++drawbox(int x, int y, int w, int h, XftColor *fg, XftColor *bg, ushort bd)
++{
++	ushort cat = bd & ~(BDB | 0xff);  /* mask out bold and data */
++	if (cat & BDE) {
++		drawextrasymbol(x, y, w, h, fg, bd & 0x3ff, bd & BDB);
++
++	} else if (cat == BRS) {
++		drawbranchsymbol(x, y, w, h, fg, bd & 0xff);
++
++	} else if (bd & (BDL | BDA)) {
++		/* lines (light/double/heavy/arcs) */
++		drawboxlines(x, y, w, h, fg, bd);
++
++	} else if (cat == BBD) {
++		/* lower (8-X)/8 block */
++		int d = DIV((uint8_t)bd * h, 8);
++		XftDrawRect(xd, fg, x, y + d, w, h - d);
++
++	} else if (cat == BBU) {
++		/* upper X/8 block */
++		XftDrawRect(xd, fg, x, y, w, DIV((uint8_t)bd * h, 8));
++
++	} else if (cat == BBL) {
++		/* left X/8 block */
++		XftDrawRect(xd, fg, x, y, DIV((uint8_t)bd * w, 8), h);
++
++	} else if (cat == BBR) {
++		/* right (8-X)/8 block */
++		int d = DIV((uint8_t)bd * w, 8);
++		XftDrawRect(xd, fg, x + d, y, w - d, h);
++
++	} else if (cat == BBQ) {
++		/* Quadrants */
++		int w2 = DIV(w, 2), h2 = DIV(h, 2);
++		if (bd & TL)
++			XftDrawRect(xd, fg, x, y, w2, h2);
++		if (bd & TR)
++			XftDrawRect(xd, fg, x + w2, y, w - w2, h2);
++		if (bd & BL)
++			XftDrawRect(xd, fg, x, y + h2, w2, h - h2);
++		if (bd & BR)
++			XftDrawRect(xd, fg, x + w2, y + h2, w - w2, h - h2);
++
++	} else if (bd & BBS) {
++		/* Shades - data is 1/2/3 for 25%/50%/75% alpha, respectively */
++		int d = (uint8_t)bd;
++		XftColor xfc;
++		XRenderColor xrc = { .alpha = 0xffff };
++
++		xrc.red = DIV(fg->color.red * d + bg->color.red * (4 - d), 4);
++		xrc.green = DIV(fg->color.green * d + bg->color.green * (4 - d), 4);
++		xrc.blue = DIV(fg->color.blue * d + bg->color.blue * (4 - d), 4);
++
++		XftColorAllocValue(xdpy, xvis, xcmap, &xrc, &xfc);
++		XftDrawRect(xd, &xfc, x, y, w, h);
++		XftColorFree(xdpy, xvis, xcmap, &xfc);
++
++	} else if (cat == BRL) {
++		/* braille, each data bit corresponds to one dot at 2x4 grid */
++		int w1 = DIV(w, 2);
++		int h1 = DIV(h, 4), h2 = DIV(h, 2), h3 = DIV(3 * h, 4);
++
++		if (bd & 1)   XftDrawRect(xd, fg, x, y, w1, h1);
++		if (bd & 2)   XftDrawRect(xd, fg, x, y + h1, w1, h2 - h1);
++		if (bd & 4)   XftDrawRect(xd, fg, x, y + h2, w1, h3 - h2);
++		if (bd & 8)   XftDrawRect(xd, fg, x + w1, y, w - w1, h1);
++		if (bd & 16)  XftDrawRect(xd, fg, x + w1, y + h1, w - w1, h2 - h1);
++		if (bd & 32)  XftDrawRect(xd, fg, x + w1, y + h2, w - w1, h3 - h2);
++		if (bd & 64)  XftDrawRect(xd, fg, x, y + h3, w1, h - h3);
++		if (bd & 128) XftDrawRect(xd, fg, x + w1, y + h3, w - w1, h - h3);
++
++	}
++}
++
++void
++drawboxlines(int x, int y, int w, int h, XftColor *fg, ushort bd)
++{
++	/* s: stem thickness. width/8 roughly matches underscore thickness. */
++	/* We draw bold as 1.5 * normal-stem and at least 1px thicker.      */
++	/* doubles draw at least 3px, even when w or h < 3. bold needs 6px. */
++	int mwh = MIN(w, h);
++	int base_s = MAX(1, DIV(mwh, 8));
++	int bold = (bd & BDB) && mwh >= 6;  /* possibly ignore boldness */
++	int s = bold ? MAX(base_s + 1, DIV(3 * base_s, 2)) : base_s;
++	int w2 = DIV(w - s, 2), h2 = DIV(h - s, 2);
++	/* the s-by-s square (x + w2, y + h2, s, s) is the center texel.    */
++	/* The base length (per direction till edge) includes this square.  */
++
++	int light = bd & (LL | LU | LR | LD);
++	int double_ = bd & (DL | DU | DR | DD);
++
++	if (light) {
++		/* d: additional (negative) length to not-draw the center   */
++		/* texel - at arcs and avoid drawing inside (some) doubles  */
++		int arc = bd & BDA;
++		int multi_light = light & (light - 1);
++		int multi_double = double_ & (double_ - 1);
++		/* light crosses double only at DH+LV, DV+LH (ref. shapes)  */
++		int d = arc || (multi_double && !multi_light) ? -s : 0;
++
++		if (bd & LL)
++			XftDrawRect(xd, fg, x, y + h2, w2 + s + d, s);
++		if (bd & LU)
++			XftDrawRect(xd, fg, x + w2, y, s, h2 + s + d);
++		if (bd & LR)
++			XftDrawRect(xd, fg, x + w2 - d, y + h2, w - w2 + d, s);
++		if (bd & LD)
++			XftDrawRect(xd, fg, x + w2, y + h2 - d, s, h - h2 + d);
++	}
++
++	/* double lines - also align with light to form heavy when combined */
++	if (double_) {
++		/*
++		* going clockwise, for each double-ray: p is additional length
++		* to the single-ray nearer to the previous direction, and n to
++		* the next. p and n adjust from the base length to lengths
++		* which consider other doubles - shorter to avoid intersections
++		* (p, n), or longer to draw the far-corner texel (n).
++		*/
++		int dl = bd & DL, du = bd & DU, dr = bd & DR, dd = bd & DD;
++		if (dl) {
++			int p = dd ? -s : 0, n = du ? -s : dd ? s : 0;
++			XftDrawRect(xd, fg, x, y + h2 + s, w2 + s + p, s);
++			XftDrawRect(xd, fg, x, y + h2 - s, w2 + s + n, s);
++		}
++		if (du) {
++			int p = dl ? -s : 0, n = dr ? -s : dl ? s : 0;
++			XftDrawRect(xd, fg, x + w2 - s, y, s, h2 + s + p);
++			XftDrawRect(xd, fg, x + w2 + s, y, s, h2 + s + n);
++		}
++		if (dr) {
++			int p = du ? -s : 0, n = dd ? -s : du ? s : 0;
++			XftDrawRect(xd, fg, x + w2 - p, y + h2 - s, w - w2 + p, s);
++			XftDrawRect(xd, fg, x + w2 - n, y + h2 + s, w - w2 + n, s);
++		}
++		if (dd) {
++			int p = dr ? -s : 0, n = dl ? -s : dr ? s : 0;
++			XftDrawRect(xd, fg, x + w2 + s, y + h2 - p, s, h - h2 + p);
++			XftDrawRect(xd, fg, x + w2 - s, y + h2 - n, s, h - h2 + n);
++		}
++	}
++}
+diff --git a/boxdraw.h b/boxdraw.h
+new file mode 100644
+index 0000000..7890500
+--- /dev/null
++++ b/boxdraw.h
+@@ -0,0 +1,214 @@
++/*
++ * Copyright 2018 Avi Halachmi (:avih) avihpit@yahoo.com https://github.com/avih
++ * MIT/X Consortium License
++ */
++
++/*
++ * U+25XX codepoints data
++ *
++ * References:
++ *   http://www.unicode.org/charts/PDF/U2500.pdf
++ *   http://www.unicode.org/charts/PDF/U2580.pdf
++ *
++ * Test page:
++ *   https://github.com/GNOME/vte/blob/master/doc/boxes.txt
++ */
++
++/* Each shape is encoded as 16-bits. Higher bits are category, lower are data */
++/* Categories (mutually exclusive except BDB): */
++/* For convenience, BDL/BDA/BBS/BDB are 1 bit each, the rest are enums */
++#define BDL (1<<8)   /* Box Draw Lines (light/double/heavy) */
++#define BDA (1<<9)   /* Box Draw Arc (light) */
++
++#define BBD (1<<10)  /* Box Block Down (lower) X/8 */
++#define BBL (2<<10)  /* Box Block Left X/8 */
++#define BBU (3<<10)  /* Box Block Upper X/8 */
++#define BBR (4<<10)  /* Box Block Right X/8 */
++#define BBQ (5<<10)  /* Box Block Quadrants */
++#define BRL (6<<10)  /* Box Braille (data is lower byte of U28XX) */
++
++#define BBS (1<<14)  /* Box Block Shades */
++#define BDB (1<<15)  /* Box Draw is Bold */
++
++/* (BDL/BDA) Light/Double/Heavy x Left/Up/Right/Down/Horizontal/Vertical      */
++/* Heavy is light+double (literally drawing light+double align to form heavy) */
++#define LL (1<<0)
++#define LU (1<<1)
++#define LR (1<<2)
++#define LD (1<<3)
++#define LH (LL+LR)
++#define LV (LU+LD)
++
++#define DL (1<<4)
++#define DU (1<<5)
++#define DR (1<<6)
++#define DD (1<<7)
++#define DH (DL+DR)
++#define DV (DU+DD)
++
++#define HL (LL+DL)
++#define HU (LU+DU)
++#define HR (LR+DR)
++#define HD (LD+DD)
++#define HH (HL+HR)
++#define HV (HU+HD)
++
++/* (BBQ) Quadrants Top/Bottom x Left/Right */
++#define TL (1<<0)
++#define TR (1<<1)
++#define BL (1<<2)
++#define BR (1<<3)
++
++/* Data for U+2500 - U+259F except dashes/diagonals */
++static const unsigned short boxdata[256] = {
++	/* light lines */
++	[0x00] = BDL + LH,       /* light horizontal */
++	[0x02] = BDL + LV,       /* light vertical */
++	[0x0c] = BDL + LD + LR,  /* light down and right */
++	[0x10] = BDL + LD + LL,  /* light down and left */
++	[0x14] = BDL + LU + LR,  /* light up and right */
++	[0x18] = BDL + LU + LL,  /* light up and left */
++	[0x1c] = BDL + LV + LR,  /* light vertical and right */
++	[0x24] = BDL + LV + LL,  /* light vertical and left */
++	[0x2c] = BDL + LH + LD,  /* light horizontal and down */
++	[0x34] = BDL + LH + LU,  /* light horizontal and up */
++	[0x3c] = BDL + LV + LH,  /* light vertical and horizontal */
++	[0x74] = BDL + LL,       /* light left */
++	[0x75] = BDL + LU,       /* light up */
++	[0x76] = BDL + LR,       /* light right */
++	[0x77] = BDL + LD,       /* light down */
++
++	/* heavy [+light] lines */
++	[0x01] = BDL + HH,
++	[0x03] = BDL + HV,
++	[0x0d] = BDL + HR + LD,
++	[0x0e] = BDL + HD + LR,
++	[0x0f] = BDL + HD + HR,
++	[0x11] = BDL + HL + LD,
++	[0x12] = BDL + HD + LL,
++	[0x13] = BDL + HD + HL,
++	[0x15] = BDL + HR + LU,
++	[0x16] = BDL + HU + LR,
++	[0x17] = BDL + HU + HR,
++	[0x19] = BDL + HL + LU,
++	[0x1a] = BDL + HU + LL,
++	[0x1b] = BDL + HU + HL,
++	[0x1d] = BDL + HR + LV,
++	[0x1e] = BDL + HU + LD + LR,
++	[0x1f] = BDL + HD + LR + LU,
++	[0x20] = BDL + HV + LR,
++	[0x21] = BDL + HU + HR + LD,
++	[0x22] = BDL + HD + HR + LU,
++	[0x23] = BDL + HV + HR,
++	[0x25] = BDL + HL + LV,
++	[0x26] = BDL + HU + LD + LL,
++	[0x27] = BDL + HD + LU + LL,
++	[0x28] = BDL + HV + LL,
++	[0x29] = BDL + HU + HL + LD,
++	[0x2a] = BDL + HD + HL + LU,
++	[0x2b] = BDL + HV + HL,
++	[0x2d] = BDL + HL + LD + LR,
++	[0x2e] = BDL + HR + LL + LD,
++	[0x2f] = BDL + HH + LD,
++	[0x30] = BDL + HD + LH,
++	[0x31] = BDL + HD + HL + LR,
++	[0x32] = BDL + HR + HD + LL,
++	[0x33] = BDL + HH + HD,
++	[0x35] = BDL + HL + LU + LR,
++	[0x36] = BDL + HR + LU + LL,
++	[0x37] = BDL + HH + LU,
++	[0x38] = BDL + HU + LH,
++	[0x39] = BDL + HU + HL + LR,
++	[0x3a] = BDL + HU + HR + LL,
++	[0x3b] = BDL + HH + HU,
++	[0x3d] = BDL + HL + LV + LR,
++	[0x3e] = BDL + HR + LV + LL,
++	[0x3f] = BDL + HH + LV,
++	[0x40] = BDL + HU + LH + LD,
++	[0x41] = BDL + HD + LH + LU,
++	[0x42] = BDL + HV + LH,
++	[0x43] = BDL + HU + HL + LD + LR,
++	[0x44] = BDL + HU + HR + LD + LL,
++	[0x45] = BDL + HD + HL + LU + LR,
++	[0x46] = BDL + HD + HR + LU + LL,
++	[0x47] = BDL + HH + HU + LD,
++	[0x48] = BDL + HH + HD + LU,
++	[0x49] = BDL + HV + HL + LR,
++	[0x4a] = BDL + HV + HR + LL,
++	[0x4b] = BDL + HV + HH,
++	[0x78] = BDL + HL,
++	[0x79] = BDL + HU,
++	[0x7a] = BDL + HR,
++	[0x7b] = BDL + HD,
++	[0x7c] = BDL + HR + LL,
++	[0x7d] = BDL + HD + LU,
++	[0x7e] = BDL + HL + LR,
++	[0x7f] = BDL + HU + LD,
++
++	/* double [+light] lines */
++	[0x50] = BDL + DH,
++	[0x51] = BDL + DV,
++	[0x52] = BDL + DR + LD,
++	[0x53] = BDL + DD + LR,
++	[0x54] = BDL + DR + DD,
++	[0x55] = BDL + DL + LD,
++	[0x56] = BDL + DD + LL,
++	[0x57] = BDL + DL + DD,
++	[0x58] = BDL + DR + LU,
++	[0x59] = BDL + DU + LR,
++	[0x5a] = BDL + DU + DR,
++	[0x5b] = BDL + DL + LU,
++	[0x5c] = BDL + DU + LL,
++	[0x5d] = BDL + DL + DU,
++	[0x5e] = BDL + DR + LV,
++	[0x5f] = BDL + DV + LR,
++	[0x60] = BDL + DV + DR,
++	[0x61] = BDL + DL + LV,
++	[0x62] = BDL + DV + LL,
++	[0x63] = BDL + DV + DL,
++	[0x64] = BDL + DH + LD,
++	[0x65] = BDL + DD + LH,
++	[0x66] = BDL + DD + DH,
++	[0x67] = BDL + DH + LU,
++	[0x68] = BDL + DU + LH,
++	[0x69] = BDL + DH + DU,
++	[0x6a] = BDL + DH + LV,
++	[0x6b] = BDL + DV + LH,
++	[0x6c] = BDL + DH + DV,
++
++	/* (light) arcs */
++	[0x6d] = BDA + LD + LR,
++	[0x6e] = BDA + LD + LL,
++	[0x6f] = BDA + LU + LL,
++	[0x70] = BDA + LU + LR,
++
++	/* Lower (Down) X/8 block (data is 8 - X) */
++	[0x81] = BBD + 7, [0x82] = BBD + 6, [0x83] = BBD + 5, [0x84] = BBD + 4,
++	[0x85] = BBD + 3, [0x86] = BBD + 2, [0x87] = BBD + 1, [0x88] = BBD + 0,
++
++	/* Left X/8 block (data is X) */
++	[0x89] = BBL + 7, [0x8a] = BBL + 6, [0x8b] = BBL + 5, [0x8c] = BBL + 4,
++	[0x8d] = BBL + 3, [0x8e] = BBL + 2, [0x8f] = BBL + 1,
++
++	/* upper 1/2 (4/8), 1/8 block (X), right 1/2, 1/8 block (8-X) */
++	[0x80] = BBU + 4, [0x94] = BBU + 1,
++	[0x90] = BBR + 4, [0x95] = BBR + 7,
++
++	/* Quadrants */
++	[0x96] = BBQ + BL,
++	[0x97] = BBQ + BR,
++	[0x98] = BBQ + TL,
++	[0x99] = BBQ + TL + BL + BR,
++	[0x9a] = BBQ + TL + BR,
++	[0x9b] = BBQ + TL + TR + BL,
++	[0x9c] = BBQ + TL + TR + BR,
++	[0x9d] = BBQ + TR,
++	[0x9e] = BBQ + BL + TR,
++	[0x9f] = BBQ + BL + TR + BR,
++
++	/* Shades, data is an alpha value in 25% units (1/4, 1/2, 3/4) */
++	[0x91] = BBS + 1, [0x92] = BBS + 2, [0x93] = BBS + 3,
++
++	/* U+2504 - U+250B, U+254C - U+254F: unsupported (dashes) */
++	/* U+2571 - U+2573: unsupported (diagonals) */
++};
+diff --git a/boxdraw_branch.c b/boxdraw_branch.c
+new file mode 100644
+index 0000000..3fe72a5
+--- /dev/null
++++ b/boxdraw_branch.c
+@@ -0,0 +1,123 @@
++/**
++ * An extension to the boxdraw patch that draws branch drawing symbols.
++ *
++ * Specification of the symbols:
++ *   https://github.com/kovidgoyal/kitty/pull/7681
++ *   https://github.com/rbong/flog-symbols
++ *
++ * Some Vim/Neovim plugins that already use the symbols:
++ *   https://github.com/rbong/vim-flog
++ *   https://github.com/isakbm/gitgraph.nvim
++ *   https://github.com/NeogitOrg/neogit
++ *
++ * Notes
++ *   - Branch drawing symbols is an independent symbol set that does not have
++ *     to be compatible with box drawing characters. So you can set a different
++ *     line thickness with boxdraw_branch_thickness if you like.
++ *   - The XRender library is required for this extension.
++ *
++ * Bug reports:
++ *   https://github.com/veltza/st-sx
++ */
++
++static int bs_generatesymbols(void);
++
++BDBuffer bsyms;
++
++/* public API */
++
++void
++drawbranchsymbol(int x, int y, int w, int h, XftColor *fg, ushort symbol)
++{
++	Picture src;
++	int maskx, masky;
++
++	if (!bs_generatesymbols())
++		return;
++
++	/* Horizontal and vertical lines don't need anti-aliasing, so we can
++	 * draw them much faster with XftDrawRect() */
++	if (symbol == BSLH_IDX) {
++		XftDrawRect(xd, fg, x, y + bsyms.cy, w, bsyms.lw);
++		return;
++	} else if (symbol == BSLV_IDX) {
++		XftDrawRect(xd, fg, x + bsyms.cx, y, bsyms.lw, h);
++		return;
++	}
++
++	/* Draw the rest of the symbols with XRender and anti-aliasing */
++	if ((src = XftDrawSrcPicture(xd, fg))) {
++		bd_getmaskcoords(&bsyms, symbol, &maskx, &masky);
++		XRenderComposite(xdpy, PictOpOver,
++			src, bsyms.mask, XftDrawPicture(xd),
++			0, 0, maskx, masky, x, y, bsyms.cw, bsyms.ch);
++	}
++}
++
++/* implementation */
++
++int
++bs_generatesymbols(void)
++{
++	int i, s, cx, cy, lw;
++	BDBuffer ssbuf;
++
++	lw = (boxdraw_branch_thickness > 0)
++		? boxdraw_branch_thickness
++		: MAX(1, DIV(MIN(win.cw, win.ch), 8));
++
++	if (bsyms.cw == win.cw && bsyms.ch == win.ch && bsyms.lw == lw)
++		return 1;
++
++	if (!XftDefaultHasRender(xdpy)) {
++		bd_errormsg("boxdraw_extra: XRender is not available");
++		return 0;
++	}
++
++	cx = DIV(win.cw - lw, 2);
++	cy = DIV(win.ch - lw, 2);
++	if (!bd_initbuffer(&bsyms, win.cw, win.ch, cx, cy, lw, 0, LEN(branchsymbols), 1)) {
++		bd_errormsg("boxdraw_extra: cannot allocate character buffer");
++		return 0;
++	} else if (!bd_initbuffer(&ssbuf, win.cw, win.ch, cx, cy, lw, 0, LEN(branchsymbols), SS_FACTOR)) {
++		bd_errormsg("boxdraw_extra: cannot allocate mask buffer");
++		free(bsyms.data);
++		return 0;
++	}
++
++	bd_drawcircle(&ssbuf, BSCM_INDX, 1);
++	bd_drawroundedcorners(&ssbuf, BSABR_INDX, BSABL_INDX, BSATL_INDX, BSATR_INDX);
++
++	for (i = 0; i < LEN(branchsymbols); i++) {
++		s = branchsymbols[i];
++		if (s & BSLR)
++			bd_drawlineright(&ssbuf, i);
++		if (s & BSLL)
++			bd_drawlineleft(&ssbuf, i);
++		if (s & BSLD)
++			bd_drawlinedown(&ssbuf, i);
++		if (s & BSLU)
++			bd_drawlineup(&ssbuf, i);
++		if (s & (BSFR | BSFL))
++			bd_drawhorizfadingline(&ssbuf, i, s & BSFL);
++		if (s & (BSFD | BSFU))
++			bd_drawvertfadingline(&ssbuf, i, s & BSFU);
++		if (s & BSABR)
++			bd_copysymbol(&ssbuf, i, BSABR_INDX, 0);
++		if (s & BSABL)
++			bd_copysymbol(&ssbuf, i, BSABL_INDX, 0);
++		if (s & BSATR)
++			bd_copysymbol(&ssbuf, i, BSATR_INDX, 0);
++		if (s & BSATL)
++			bd_copysymbol(&ssbuf, i, BSATL_INDX, 0);
++		if (s & BSCM)
++			bd_copysymbol(&ssbuf, i,  BSCM_INDX, 0);
++		if (s & BSCN)
++			bd_drawcircle(&ssbuf, i, 0);
++	}
++
++	bd_downsample(&bsyms, 0, &ssbuf, 0, bsyms.numchars);
++	bd_createmask(&bsyms);
++	free(ssbuf.data);
++	return 1;
++}
+diff --git a/boxdraw_branch.h b/boxdraw_branch.h
+new file mode 100644
+index 0000000..8ccbeb3
+--- /dev/null
++++ b/boxdraw_branch.h
+@@ -0,0 +1,117 @@
++/**
++ * Data for branch drawing symbols U+F5D0..U+F60D
++ */
++
++void drawbranchsymbol(int, int, int, int, XftColor *, ushort);
++
++/* Box draw category (see boxdraw.h): */
++#define BRS (7<<10)  /* Box Branch symbols */
++
++/* Data */
++#define BSFR  (1<<0)   /* fade line to right */
++#define BSFL  (1<<1)   /* fade line to left */
++#define BSFD  (1<<2)   /* fade line to down */
++#define BSFU  (1<<3)   /* fade line to up */
++
++#define BSABR (1<<4)   /* arc from bottom to right */
++#define BSABL (1<<5)   /* arc from bottom to left */
++#define BSATR (1<<6)   /* arc from top to right */
++#define BSATL (1<<7)   /* arc from top to left */
++
++#define BSCN  (1<<8)   /* commit non-merged */
++#define BSCM  (1<<9)   /* commit merged */
++
++#define BSLR  (1<<10)  /* line right */
++#define BSLL  (1<<11)  /* line left */
++#define BSLD  (1<<12)  /* line down */
++#define BSLU  (1<<13)  /* line up */
++
++#define BSLH  (BSLR + BSLL)  /* line horizontal */
++#define BSLV  (BSLD + BSLU)  /* line vertical */
++
++#define BSLH_IDX    0
++#define BSLV_IDX    1
++#define BSABR_INDX  6
++#define BSABL_INDX  7
++#define BSATR_INDX  8
++#define BSATL_INDX  9
++#define BSCM_INDX   30
++
++static const unsigned int branchsymbols[] = {
++	BSLH,                             /* U+F5D0 */
++	BSLV,                             /* U+F5D1 */
++	BSFR,                             /* U+F5D2 */
++	BSFL,                             /* U+F5D3 */
++	BSFD,                             /* U+F5D4 */
++	BSFU,                             /* U+F5D5 */
++
++	BSABR,                            /* U+F5D6 */
++	BSABL,                            /* U+F5D7 */
++	BSATR,                            /* U+F5D8 */
++	BSATL,                            /* U+F5D9 */
++
++	BSATR + BSLV,                     /* U+F5DA */
++	BSABR + BSLV,                     /* U+F5DB */
++	BSATR + BSABR,                    /* U+F5DC */
++	BSATL + BSLV,                     /* U+F5DD */
++	BSABL + BSLV,                     /* U+F5DE */
++	BSATL + BSABL,                    /* U+F5DF */
++
++	BSABL + BSLH,                     /* U+F5E0 */
++	BSABR + BSLH,                     /* U+F5E1 */
++	BSABL + BSABR,                    /* U+F5E2 */
++	BSATL + BSLH,                     /* U+F5E3 */
++	BSATR + BSLH,                     /* U+F5E4 */
++	BSATL + BSATR,                    /* U+F5E5 */
++
++	BSATL + BSATR + BSLV,             /* U+F5E6 */
++	BSABL + BSABR + BSLV,             /* U+F5E7 */
++	BSATL + BSABL + BSLH,             /* U+F5E8 */
++	BSATR + BSABR + BSLH,             /* U+F5E9 */
++
++	BSATL + BSABR + BSLV,             /* U+F5EA */
++	BSATR + BSABL + BSLV,             /* U+F5EB */
++	BSATL + BSABR + BSLH,             /* U+F5EC */
++	BSATR + BSABL + BSLH,             /* U+F5ED */
++
++	BSCM,                             /* U+F5EE */
++	BSCN,                             /* U+F5EF */
++
++	BSCM + BSLR,                      /* U+F5F0 */
++	BSCN + BSLR,                      /* U+F5F1 */
++	BSCM + BSLL,                      /* U+F5F2 */
++	BSCN + BSLL,                      /* U+F5F3 */
++
++	BSCM + BSLH,                      /* U+F5F4 */
++	BSCN + BSLL + BSLR,               /* U+F5F5 */
++
++	BSCM + BSLD,                      /* U+F5F6 */
++	BSCN + BSLD,                      /* U+F5F7 */
++	BSCM + BSLU,                      /* U+F5F8 */
++	BSCN + BSLU,                      /* U+F5F9 */
++
++	BSCM + BSLV,                      /* U+F5FA */
++	BSCN + BSLU + BSLD,               /* U+F5FB */
++
++	BSCM + BSLR + BSLD,               /* U+F5FC */
++	BSCN + BSLR + BSLD,               /* U+F5FD */
++	BSCM + BSLL + BSLD,               /* U+F5FE */
++	BSCN + BSLL + BSLD,               /* U+F5FF */
++	BSCM + BSLR + BSLU,               /* U+F600 */
++	BSCN + BSLR + BSLU,               /* U+F601 */
++	BSCM + BSLL + BSLU,               /* U+F602 */
++	BSCN + BSLL + BSLU,               /* U+F603 */
++
++	BSCM + BSLR + BSLV,               /* U+F604 */
++	BSCN + BSLR + BSLU + BSLD,        /* U+F605 */
++	BSCM + BSLL + BSLV,               /* U+F606 */
++	BSCN + BSLL + BSLU + BSLD,        /* U+F607 */
++
++	BSCM + BSLD + BSLH,               /* U+F608 */
++	BSCN + BSLD + BSLL + BSLR,        /* U+F609 */
++	BSCM + BSLU + BSLH,               /* U+F60A */
++	BSCN + BSLU + BSLL + BSLR,        /* U+F60B */
++
++	BSCM + BSLV + BSLH,               /* U+F60C */
++	BSCN + BSLL + BSLR + BSLU + BSLD, /* U+F60D */
++};
+diff --git a/boxdraw_common.c b/boxdraw_common.c
+new file mode 100644
+index 0000000..ad227b9
+--- /dev/null
++++ b/boxdraw_common.c
+@@ -0,0 +1,445 @@
++/**
++ * Common functions for creating box drawing characters.
++ */
++
++int
++bd_initbuffer(BDBuffer *buf, int cw, int ch, int cx, int cy, int lw, int xmargin, int numchars, int factor)
++{
++	buf->cw = cw * factor;
++	buf->ch = ch * factor;
++	buf->cx = cx * factor;
++	buf->cy = cy * factor;
++	buf->lw = lw * factor;
++	buf->xmargin = xmargin * factor;
++	buf->charwidth = buf->cw + buf->xmargin * 2;
++	buf->factor = factor;
++	buf->numchars = numchars;
++	buf->cols = MIN(DisplayWidth(xdpy, xw.scr) * factor / buf->charwidth, numchars);
++	if (buf->cols <= 0)
++		return 0;
++	buf->rows = (numchars + buf->cols - 1) / buf->cols;
++	buf->width = buf->cols * buf->charwidth;
++	buf->height = buf->rows * buf->ch;
++	if (!(buf->data = xmalloc(buf->width * buf->height)))
++		return 0;
++	memset(buf->data, 0, buf->width * buf->height);
++	return 1;
++}
++
++void
++bd_createmask(BDBuffer *buf)
++{
++	Pixmap maskpixmap;
++	XImage *ximage;
++	GC gc;
++	int w = buf->width, h = buf->height;
++
++	if (buf->mask)
++		XRenderFreePicture(xdpy, buf->mask);
++
++	maskpixmap = XCreatePixmap(xdpy, XftDrawDrawable(xd), w, h, 8);
++	buf->mask = XRenderCreatePicture(xdpy, maskpixmap,
++			XRenderFindStandardFormat(xdpy, PictStandardA8), 0, 0);
++
++	gc = XCreateGC(xdpy, maskpixmap, 0, 0);
++	ximage = XCreateImage(xdpy, xvis, 8, ZPixmap, 0, (char *)buf->data, w, h, 8, w);
++	XPutImage(xdpy, maskpixmap, gc, ximage, 0, 0, 0, 0, w, h);
++
++	XFreeGC(xdpy, gc);
++	XFreePixmap(xdpy, maskpixmap);
++	XDestroyImage(ximage); /* frees buf->data as well */
++}
++
++void
++bd_getmaskcoords(BDBuffer *buf, int idx, int *x, int *y)
++{
++	*x = idx % buf->cols * buf->charwidth;
++	*y = idx / buf->cols * buf->ch;
++}
++
++uchar *
++bd_getsymbol(BDBuffer *buf, int idx)
++{
++	int col = idx % buf->cols;
++	int row = idx / buf->cols;
++	return buf->data + col * buf->charwidth + row * buf->ch * buf->width;
++}
++
++
++uchar
++bd_avgintensity(uchar *data, int w, int f)
++{
++	uint x, y, sum;
++
++	for (sum = 0, y = 0; y < f; y++, data += w)
++		for (x = 0; x < f; x++)
++			sum += (uint)data[x];
++
++	return (sum + (f * f / 2)) / (f * f);
++}
++
++void
++bd_downsample(BDBuffer *dstbuf, int dstidx, BDBuffer *srcbuf, int srcidx, int numchars)
++{
++	uchar *dst, *src;
++	int i, x, y;
++	int f = srcbuf->factor, cw = srcbuf->charwidth, ch = srcbuf->ch;
++	int sw = srcbuf->width, dw = dstbuf->width - dstbuf->charwidth;
++
++	for (i = 0; i < numchars; i++) {
++		dst = bd_getsymbol(dstbuf, dstidx + i);
++		src = bd_getsymbol(srcbuf, srcidx + i);
++		for (y = 0; y < ch; y += f, src += sw * f, dst += dw)
++			for (x = 0; x < cw; x += f)
++				*dst++ = bd_avgintensity(&src[x], sw, f);
++	}
++}
++
++void
++bd_drawrect(BDBuffer *buf, int idx, int x, int y, int w, int h, int alpha)
++{
++	uchar *data = bd_getsymbol(buf, idx) + buf->xmargin;
++	int x1 = MAX(0, x);
++	int y1 = MAX(0, y);
++	int x2 = MIN(buf->cw, x + w);
++	int y2 = MIN(buf->ch, y + h);
++
++	if (x1 >= buf->cw || y1 >= buf->ch || x2 < 0 || y2 < 0)
++		return;
++
++	data += y1 * buf->width + x1;
++	for (y = y1; y < y2; y++, data += buf->width)
++		memset(data, alpha, x2 - x1);
++}
++
++void
++bd_drawlineup(BDBuffer *buf, int idx)
++{
++	int cx = buf->cx, cy = buf->cy, lw = buf->lw;
++	bd_drawrect(buf, idx, cx, 0, lw, cy + lw, 255);
++}
++
++void
++bd_drawlinedown(BDBuffer *buf, int idx)
++{
++	int cx = buf->cx, cy = buf->cy, ch = buf->ch, lw = buf->lw;
++	bd_drawrect(buf, idx, cx, cy, lw, ch - cy, 255);
++}
++
++void
++bd_drawlineleft(BDBuffer *buf, int idx)
++{
++	int cx = buf->cx, cy = buf->cy, lw = buf->lw;
++	bd_drawrect(buf, idx, 0, cy, cx + lw, lw, 255);
++}
++
++void
++bd_drawlineright(BDBuffer *buf, int idx)
++{
++	int cx = buf->cx, cy = buf->cy, cw = buf->cw, lw = buf->lw;
++	bd_drawrect(buf, idx, cx, cy, cw - cx, lw, 255);
++}
++
++void
++bd_drawroundedcorners(BDBuffer *buf, int br, int bl, int tl, int tr)
++{
++	int lw = buf->lw, f = buf->factor;
++	int ox1 = buf->cx, oy1 = buf->cy;
++	int ox2 = ox1 + lw - 1, oy2 = oy1 + lw - 1;
++	int c, cx, cy, d, d1, d2, rw, rh, r, x, y;
++	uchar *cbr = bd_getsymbol(buf, br) + buf->xmargin;
++	uchar *cbl = bd_getsymbol(buf, bl) + buf->xmargin;
++	uchar *ctl = bd_getsymbol(buf, tl) + buf->xmargin;
++	uchar *ctr = bd_getsymbol(buf, tr) + buf->xmargin;
++
++	bd_drawlineup(buf, tl);
++	bd_drawlineup(buf, tr);
++	bd_drawlinedown(buf, bl);
++	bd_drawlinedown(buf, br);
++	bd_drawlineright(buf, tr);
++	bd_drawlineright(buf, br);
++	bd_drawlineleft(buf, tl);
++	bd_drawlineleft(buf, bl);
++
++	rw = buf->cw - ox1;
++	rh = buf->ch - oy1;
++	r = MIN(rw, rh);
++
++	d1 = r - lw - (f / 4);
++	d1 = d1 * d1;
++	d2 = r * r;
++
++	cx = cy = r - 1;
++
++	for (y = 0; y < r; y++) {
++		for (x = 0; x < r; x++) {
++			d = (cx-x)*(cx-x) + (cy-y)*(cy-y);
++			c = (d1 <= d && d <= d2) ? 255 : 0;
++			cbr[(oy1 + y) * buf->width + ox1 + x] = c;
++			cbl[(oy1 + y) * buf->width + ox2 - x] = c;
++			ctr[(oy2 - y) * buf->width + ox1 + x] = c;
++			ctl[(oy2 - y) * buf->width + ox2 - x] = c;
++		}
++	}
++}
++
++void
++bd_drawcircle(BDBuffer *buf, int idx, int fill)
++{
++	uchar *data = bd_getsymbol(buf, idx) + buf->xmargin;
++	int f = buf->factor, lw = buf->lw / f;
++	int cw = buf->cw / f, ch = buf->ch / f;
++	int d, d1, d2, ox, oy, scale, rw, rh, r, x, y;
++
++	if (lw & 1) {
++		ox = (cw / 2 * f) + (f / 2);
++		oy = (ch / 2 * f) + (f / 2);
++		scale = (cw < 9) ? 100 : 90;
++	} else {
++		ox = (cw + 1) / 2 * f;
++		oy = (ch + 1) / 2 * f;
++		scale = (cw < 10) ? 100 : 90;
++	}
++
++	rw = buf->cw - ox;
++	rh = buf->ch - oy;
++	r = MIN(rw, rh) * scale / 100 - 1;
++
++	d1 = 0;
++	if (!fill) {
++		d1 = r - lw * f;
++		if (lw == 1 && cw > 8)
++			d1 = (d1 - f / 4) * (d1 - f / 4);
++		else if (lw == 1 && cw > 6)
++			d1 = d1 * d1 - f * 3;
++		else
++			d1 = d1 * d1;
++	}
++	d2 = r * r;
++
++	for (y = 0; y < buf->ch; y++, data += buf->width) {
++		for (x = 0; x < buf->cw; x++) {
++			d = (ox-x)*(ox-x) + (oy-y)*(oy-y);
++			if (d1 <= d && d <= d2)
++				data[x] = 255;
++			else if (d < d1)
++				data[x] = 0;
++		}
++	}
++}
++
++void
++bd_drawhorizfadingline(BDBuffer *buf, int idx, int left)
++{
++	int i, x, sz, steps = 4;
++	int cy = buf->cy, cw = buf->cw, lw = buf->lw;
++
++	for (i = 0; i < steps; i++) {
++		sz = cw * (steps - i) / (steps * steps + steps);
++		x = i * cw / steps;
++		if (left)
++			x = cw - x - sz;
++		bd_drawrect(buf, idx, x, cy, sz, lw, 255);
++	}
++}
++
++void
++bd_drawvertfadingline(BDBuffer *buf, int idx, int up)
++{
++	int i, y, sz, steps = 5;
++	int cx = buf->cx, ch = buf->ch, lw = buf->lw;
++
++	for (i = 0; i < steps; i++) {
++		sz = ch * (steps - i) / (steps * steps + steps);
++		y = i * ch / steps;
++		if (up)
++			y = ch - y - sz;
++		bd_drawrect(buf, idx, cx, y, lw, sz, 255);
++	}
++}
++
++void
++bd_drawhdashes(BDBuffer *buf, int idx, int n, int heavy)
++{
++	int i, w, x1, x2, f = buf->factor, cw = buf->cw / f, s = 1;
++	int y1 = buf->cy - (heavy ? buf->lw : 0);
++	int y2 = buf->cy + (heavy ? buf->lw : 0) + buf->lw;
++
++	if (cw < 4) {
++		bd_drawrect(buf, idx, 0, y1, buf->cw, y2 - y1, 255);
++		return;
++	}
++
++	if (cw < 7 || (cw < 12 && n >= 3) || (cw <= 16 && n == 4)) {
++		n = (cw < 6) ? 2 : n;
++		n = (cw < 8 && n == 4) ? 3 : n;
++		w = cw / n;
++		for (i = 0; i < n; i++) {
++			x1 = i * cw / n;
++			x2 = (i + 1) * cw / n;
++			bd_drawrect(buf, idx, x1 * f, y1, (x2 - x1 - s) * f, y2 - y1, 255);
++		}
++		return;
++	}
++
++	for (i = 0; i < n; i++) {
++		x1 = i * buf->cw / n;
++		x2 = (i + 1) * buf->cw / n;
++		w = x2 - x1;
++		s = w * 30 / 100;
++		bd_drawrect(buf, idx, x1, y1, w - s, y2 - y1, 255);
++	}
++}
++
++void
++bd_drawvdashes(BDBuffer *buf, int idx, int n, int heavy)
++{
++	int i, s, h, y1, y2, ch = buf->ch;
++	int x1 = buf->cx - (heavy ? buf->lw : 0);
++	int x2 = buf->cx + (heavy ? buf->lw : 0) + buf->lw;
++
++	for (i = 0; i < n; i++) {
++		y1 = i * ch / n;
++		y2 = (i + 1) * ch / n;
++		h = y2 - y1;
++		s = h * 40 / 100;
++		bd_drawrect(buf, idx, x1, y1 + s/2, x2 - x1, h - s, 255);
++	}
++}
++
++void
++bd_drawdiagonals(BDBuffer *buf, int lr, int rl, int cross)
++{
++	uchar *datalr = bd_getsymbol(buf, lr);
++	uchar *datarl = bd_getsymbol(buf, rl);
++	int w = MAX(1, buf->cw), h = MAX(1, buf->ch);
++	int j, x, y, lw = buf->lw * ((buf->lw / buf->factor > 1) ? 10 : 11) / 4;
++	int cw = buf->charwidth, ch = buf->ch;
++
++	for (x = 0; x < cw; x++) {
++		y = (x - buf->xmargin) * h / w;
++		for (j = y - lw/2; j < y + lw - lw/2; j++) {
++			if (j >= 0 && j < ch) {
++				datalr[j * buf->width + x] = 255;
++				datarl[j * buf->width + cw - x - 1] = 255;
++			}
++		}
++	}
++	bd_copysymbol(buf, cross, lr, 0);
++	bd_copysymbol(buf, cross, rl, 0);
++}
++
++void
++bd_drawblockpatterns(BDBuffer *buf, int idx, uchar *blockpatterns, int len, int rows)
++{
++	int i, row, x1, x2, y1, y2, cx = DIV(buf->cw, 2);
++	uchar pattern;
++
++	for (i = 0; i < len; i++) {
++		pattern = blockpatterns[i];
++		for (row = 0; row < rows; row++, pattern >>= 2) {
++			if (pattern & 3) {
++				x1 = (pattern & 1) ? 0 : cx;
++				x2 = (pattern & 2) ? buf->cw : cx;
++				y1 = DIV(buf->ch * row, rows);
++				y2 = DIV(buf->ch * (row + 1), rows);
++				bd_drawrect(buf, idx + i, x1, y1, x2 - x1, y2 - y1, 255);
++			}
++		}
++	}
++}
++
++void
++bd_drawtriangle(BDBuffer *buf, int idx, int ax, int ay, int bx, int by, int cx, int cy, int alpha)
++{
++	uchar *data = bd_getsymbol(buf, idx) + buf->xmargin;
++	int xl, xr, y;
++	double x1 = ax, y1 = ay;
++	double x2 = bx, y2 = by;
++	double x3 = cx, y3 = cy;
++	double sx1, sx2, dx1, dx2, t;
++
++	#define SWAP(a, b) { t = a; a = b; b = t; }
++	#define RENDERLINE(a, b) { \
++			xl = MIN(a, b); \
++			xr = MAX(a, b); \
++			memset(data + xl, alpha, xr - xl + 1); \
++		}
++
++	if (y1 > y2) {
++		SWAP(y1, y2); SWAP(x1, x2);
++	}
++	if (y2 > y3) {
++		SWAP(y2, y3); SWAP(x2, x3);
++		if (y1 > y2) {
++			SWAP(y1, y2); SWAP(x1, x2);
++		}
++	}
++	data += (int)y1 * buf->width;
++
++	if (y1 == y2 && y2 == y3) {
++		RENDERLINE(MIN(MIN(x1, x2), x3), MAX(MAX(x1, x2), x3));
++		return;
++	}
++
++	/* top half of triangle */
++	sx1 = x1;
++	dx1 = (x3 - x1) / (y3 - y1);
++	if (y1 < y2) {
++		sx2 = x1;
++		dx2 = (x2 - x1) / (y2 - y1);
++		for (y = y1; y < (int)y2; y++, sx1 += dx1, sx2 += dx2, data += buf->width) {
++			RENDERLINE(sx1, sx2);
++		}
++		if (y2 == y3) {
++			RENDERLINE(x2, x3);
++			return;
++		}
++	}
++
++	/* bottom half of triangle */
++	sx2 = x2;
++	dx2 = (x3 - x2) / (y3 - y2);
++	for (y = y2; y < (int)y3; y++, sx1 += dx1, sx2 += dx2, data += buf->width) {
++		RENDERLINE(sx1, sx2);
++	}
++	data[(int)x3] = alpha;
++
++	#undef SWAP
++	#undef RENDERLINE
++}
++
++void
++bd_copysymbol(BDBuffer *buf, int dstidx, int srcidx, int fliphoriz)
++{
++	uchar *dst = bd_getsymbol(buf, dstidx) + (fliphoriz ? buf->charwidth-1 : 0);
++	uchar *src = bd_getsymbol(buf, srcidx);
++	int x, y, cw = buf->charwidth, ch = buf->ch;
++	int srcw = buf->width - cw;
++	int dstw = fliphoriz ? buf->width + cw : srcw;
++	int dstinc = fliphoriz ? -1 : 1;
++
++	for (y = 0; y < ch; y++, dst += dstw, src += srcw)
++		for (x = 0; x < cw; x++, dst += dstinc, src++)
++			*dst |= *src;
++}
++
++void
++bd_erasesymbol(BDBuffer *buf, int idx)
++{
++	int y;
++	uchar *data = bd_getsymbol(buf, idx);
++
++	for (y = 0; y < buf->ch; y++, data += buf->width)
++		memset(data, 0, buf->charwidth);
++}
++
++void
++bd_errormsg(char *msg)
++{
++	static int errorsent;
++
++	if (!errorsent)
++		fprintf(stderr, "%s\n", msg);
++	errorsent = 1;
++}
+diff --git a/boxdraw_common.h b/boxdraw_common.h
+new file mode 100644
+index 0000000..ba69d87
+--- /dev/null
++++ b/boxdraw_common.h
+@@ -0,0 +1,41 @@
++#define SS_FACTOR  5
++
++typedef struct {
++	int cw, ch;    /* character width and height without margins */
++	int cx, cy;    /* left and top edges where centered lines are drawn */
++	int lw;        /* line width */
++	int xmargin;   /* x-margin */
++	int charwidth; /* character width including margins */
++	int factor;    /* subpixel factor */
++	int numchars;  /* number of characters */
++	int cols;      /* number of columns in buffer */
++	int rows;      /* number of rows in buffer */
++	int width;     /* buffer width in pixels */
++	int height;    /* buffer height in pixels */
++	uchar *data;   /* picture data */
++	Picture mask;  /* picture mask */
++} BDBuffer;
++
++int bd_initbuffer(BDBuffer *buf, int cw, int ch, int cx, int cy, int lw, int xmargin, int numchars, int factor);
++void bd_createmask(BDBuffer *buf);
++void bd_getmaskcoords(BDBuffer *buf, int idx, int *x, int *y);
++uchar *bd_getsymbol(BDBuffer *buf, int idx);
++uchar bd_avgintensity(uchar *data, int cw, int f);
++void bd_downsample(BDBuffer *dstbuf, int dstidx, BDBuffer *srcbuf, int srcidx, int numchars);
++void bd_drawrect(BDBuffer *buf, int idx, int x, int y, int w, int h, int alpha);
++void bd_drawlineup(BDBuffer *buf, int idx);
++void bd_drawlinedown(BDBuffer *buf, int idx);
++void bd_drawlineleft(BDBuffer *buf, int idx);
++void bd_drawlineright(BDBuffer *buf, int idx);
++void bd_drawroundedcorners(BDBuffer *buf, int br, int bl, int tl, int tr);
++void bd_drawcircle(BDBuffer *buf, int idx, int fill);
++void bd_drawhorizfadingline(BDBuffer *buf, int idx, int left);
++void bd_drawvertfadingline(BDBuffer *buf, int idx, int up);
++void bd_drawhdashes(BDBuffer *buf, int idx, int n, int heavy);
++void bd_drawvdashes(BDBuffer *buf, int idx, int n, int heavy);
++void bd_drawdiagonals(BDBuffer *buf, int lr, int rl, int cross);
++void bd_drawblockpatterns(BDBuffer *buf, int idx, uchar *blockpatterns, int len, int rows);
++void bd_drawtriangle(BDBuffer *buf, int idx, int ax, int ay, int bx, int by, int cx, int cy, int alpha);
++void bd_copysymbol(BDBuffer *buf, int dstidx, int srcidx, int fliphoriz);
++void bd_erasesymbol(BDBuffer *buf, int idx);
++void bd_errormsg(char *msg);
+diff --git a/boxdraw_extra.c b/boxdraw_extra.c
+new file mode 100644
+index 0000000..d870521
+--- /dev/null
++++ b/boxdraw_extra.c
+@@ -0,0 +1,484 @@
++/**
++ * boxdraw_extra draws dashes, diagonals, sextants, octants and proper rounded
++ * corners that the original boxdraw patch doesn't implement or draw properly.
++ */
++static int be_generatesymbols(BDBuffer *buf, int bold);
++static void be_drawlegacy(BDBuffer *ssbuf, BDBuffer *buf);
++static int be_drawwedges(BDBuffer *ssbuf, BDBuffer *buf, int idx);
++static void be_drawwedge(BDBuffer *ssbuf, BDBuffer *buf, int idx, int x1, int y1, int x2, int y2, int x3, int y3, int block, int invert);
++static int be_draw_vertical_one_eighth_blocks(BDBuffer *buf, int idx);
++static int be_draw_horizontal_one_eighth_blocks(BDBuffer *buf, int idx);
++static int be_draw_one_eighth_frames(BDBuffer *buf, int idx);
++static int be_draw_horizontal_one_eighth_block_1358(BDBuffer *buf, int idx);
++static int be_draw_upper_one_eighth_blocks(BDBuffer *buf, int idx);
++static int be_draw_right_one_eighth_blocks(BDBuffer *buf, int idx);
++static int be_draw_medium_shades(BDBuffer *buf, int idx);
++static int be_draw_checker_board_fill(BDBuffer *ssbuf, BDBuffer *buf, int idx);
++static int be_draw_heavy_horizontal_fill(BDBuffer *buf, int idx);
++static int be_draw_diagonal_fill(BDBuffer *ssbuf, BDBuffer *buf, int idx);
++static int be_draw_triangular_medium_shades(BDBuffer *ssbuf, BDBuffer *buf, int idx);
++static int be_draw_left_thirds_blocks(BDBuffer *buf, int idx);
++static int be_draw_one_quarter_blocks(BDBuffer *buf, int idx);
++
++struct {
++	BDBuffer norm;
++	BDBuffer bold;
++} bdextra;
++
++/* public API */
++
++void
++drawextrasymbol(int x, int y, int w, int h, XftColor *fg, ushort symbol, int bold)
++{
++	Picture src;
++	int maskx, masky;
++	BDBuffer *buf = bold ? &bdextra.bold : &bdextra.norm;
++
++	if (!be_generatesymbols(buf, bold))
++		return;
++
++	if ((src = XftDrawSrcPicture(xd, fg))) {
++		bd_getmaskcoords(buf, symbol, &maskx, &masky);
++		XRenderComposite(xdpy, PictOpOver,
++			src, buf->mask, XftDrawPicture(xd),
++			0, 0, maskx, masky, x - buf->xmargin, y, buf->charwidth, buf->ch);
++	}
++}
++
++void
++initextrasymbols(void)
++{
++	int i;
++
++	for (i = 0; i < LEN(boxlegacy); i++)
++		boxlegacy[i] = (i < BE_LEGACY_LEN-6) ? i + 1 : 0;
++
++	boxlegacy[0x93] = 0;                 /* U+1FB93 - reserved */
++	boxlegacy[0xCE] = BE_LEGACY_LEN - 5; /* U+1FBCE */
++	boxlegacy[0xCF] = BE_LEGACY_LEN - 4; /* U+1FBCF */
++	boxlegacy[0xE4] = BE_LEGACY_LEN - 3; /* U+1FBE4 */
++	boxlegacy[0xE5] = BE_LEGACY_LEN - 2; /* U+1FBE5 */
++	boxlegacy[0xE6] = BE_LEGACY_LEN - 1; /* U+1FBE6 */
++	boxlegacy[0xE7] = BE_LEGACY_LEN;     /* U+1FBE7 */
++}
++
++/* implementation */
++
++int
++be_generatesymbols(BDBuffer *buf, int bold)
++{
++	const uchar *bm = boxmisc;
++	BDBuffer ssbuf;
++	int cx, cy;
++	int mwh = MIN(win.cw, win.ch);
++	int base_lw = MAX(1, DIV(mwh, 8));
++	int lw = (bold && mwh >= 6) ? MAX(base_lw + 1, DIV(3 * base_lw, 2)) : base_lw;
++
++	if (buf->cw == win.cw && buf->ch == win.ch && buf->lw == lw)
++		return 1;
++
++	if (!XftDefaultHasRender(xdpy)) {
++		bd_errormsg("boxdraw_extra: XRender is not available");
++		return 0;
++	}
++
++	cx = DIV(win.cw - lw, 2);
++	cy = DIV(win.ch - lw, 2);
++	if (!bd_initbuffer(buf, win.cw, win.ch, cx, cy, lw, lw, BE_EXTRA_LEN, 1)) {
++		bd_errormsg("boxdraw_extra: cannot allocate character buffer");
++		return 0;
++	} else if (!bd_initbuffer(&ssbuf, win.cw, win.ch, cx, cy, lw, lw, BE_MISC_LEN, SS_FACTOR)) {
++		bd_errormsg("boxdraw_extra: cannot allocate mask buffer");
++		free(buf->data);
++		return 0;
++	}
++
++	/* dashes, diagonals, rounded corners */
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH2], 2, 0);
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH3], 3, 0);
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH4], 4, 0);
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH2_HEAVY], 2, 1);
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH3_HEAVY], 3, 1);
++	bd_drawhdashes(&ssbuf, bm[BE_HDASH4_HEAVY], 4, 1);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH2], 2, 0);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH3], 3, 0);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH4], 4, 0);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH2_HEAVY], 2, 1);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH3_HEAVY], 3, 1);
++	bd_drawvdashes(&ssbuf, bm[BE_VDASH4_HEAVY], 4, 1);
++	bd_drawroundedcorners(&ssbuf, bm[BE_ARC_DR], bm[BE_ARC_DL], bm[BE_ARC_UL], bm[BE_ARC_UR]);
++	bd_drawdiagonals(&ssbuf, bm[BE_DIAG_LR], bm[BE_DIAG_RL], bm[BE_DIAG_CROSS]);
++	bd_downsample(buf, 0, &ssbuf, 0, BE_MISC_LEN);
++
++	/* octants */
++	bd_drawblockpatterns(buf, BE_OCTANTS_IDX, boxdataoctants, BE_OCTANTS_LEN, 4);
++
++	/* legacy characters (sextants, wedges, etc.)  */
++	be_drawlegacy(&ssbuf, buf);
++
++	bd_createmask(buf);
++	free(ssbuf.data);
++	return 1;
++}
++
++void
++be_drawlegacy(BDBuffer *ssbuf, BDBuffer *buf)
++{
++	int idx = BE_LEGACY_IDX;
++
++	/* sextants U+1FB00..U+1FB3B */
++	bd_drawblockpatterns(buf, idx, boxdatasextants, BE_SEXTANTS_LEN, 3);
++	idx += BE_SEXTANTS_LEN;
++
++	/* wedges and other charactesr */
++	idx = be_drawwedges(ssbuf, buf, idx); /* U+1FB3C..U+1FB6F and U+1FB9A..U+1FB9B */
++	idx = be_draw_vertical_one_eighth_blocks(buf, idx);        /* U+1FB70..U+1FB75 */
++	idx = be_draw_horizontal_one_eighth_blocks(buf, idx);      /* U+1FB76..U+1FB7B */
++	idx = be_draw_one_eighth_frames(buf, idx);                 /* U+1FB7C..U+1FB80 */
++	idx = be_draw_horizontal_one_eighth_block_1358(buf, idx);  /* U+1FB81 */
++	idx = be_draw_upper_one_eighth_blocks(buf, idx);           /* U+1FB82..U+1FB86 */
++	idx = be_draw_right_one_eighth_blocks(buf, idx);           /* U+1FB87..U+1FB8B */
++	idx = be_draw_medium_shades(buf, idx);                     /* U+1FB8C..U+1FB94 */
++	idx = be_draw_checker_board_fill(ssbuf, buf, idx);         /* U+1FB95..U+1FB96 */
++	idx = be_draw_heavy_horizontal_fill(buf, idx);             /* U+1FB97 */
++	idx = be_draw_diagonal_fill(ssbuf, buf, idx);              /* U+1FB98..U+1FB99 */
++	idx += 2;                                                  /* U+1FB9A..U+1FB9B (wedge chars) */
++	idx = be_draw_triangular_medium_shades(ssbuf, buf, idx);   /* U+1FB9C..U+1FB9F */
++	idx = be_draw_left_thirds_blocks(buf, idx);                /* U+1FBCE..U+1FBCF */
++	idx = be_draw_one_quarter_blocks(buf, idx);                /* U+1FBE4..U+1FBE7 */
++}
++
++int
++be_drawwedges(BDBuffer *ssbuf, BDBuffer *buf, int idx)
++{
++	int cw = ssbuf->cw, ch = ssbuf->ch, cy = DIV(ch, 2);
++	int x0 = 0, x1 = DIV(cw, 2);
++	int y0 = 0, y1 = ch / 3, y2 = ch * 2 / 3;
++	int x0e = x1 - 1, x1e = cw - 1;
++	int y0e = y1 - 1, y1e = y2 - 1, y2e = ch - 1;
++	int i, invert;
++
++	bd_erasesymbol(ssbuf, 0);
++	for (invert = 0, i = 0; i < 2; i++, invert ^= 1) {
++		be_drawwedge(ssbuf, buf, idx++, x0, y2, x0, y2e, x0e, y2e, 0, invert);     /* U+1FB3C: '🬼', U+1FB52: '🭒' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y2, x0, y2e, x1e, y2e, 0, invert);     /* U+1FB3D: '🬽', U+1FB53; '🭓' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y1, x0, y2e, x0e, y2e, 0, invert);     /* U+1FB3E: '🬾', U+1FB54: '🭔' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y1, x0, y2e, x1e, y2e, 0, invert);     /* U+1FB3F: '🬿', U+1FB55: '🭕' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y2e, x0e, y2e, 0, invert);     /* U+1FB40: '🭀', U+1FB56: '🭖' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y0e, x0e, y0, 0, invert ^ 1);  /* U+1FB41: '🭁', U+1FB57: '🭗' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y0e, x1e, y0, 0, invert ^ 1);  /* U+1FB42: '🭂', U+1FB58: '🭘' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y1e, x0e, y0, 0, invert ^ 1);  /* U+1FB43: '🭃', U+1FB59: '🭙' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y1e, x1e, y0, 0, invert ^ 1);  /* U+1FB44: '🭄', U+1FB5A: '🭚' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y2e, x0e, y0, 0, invert ^ 1);  /* U+1FB45: '🭅', U+1FB5B: '🭛' */
++		if (i == 0)
++			be_drawwedge(ssbuf, buf, idx++, x1e, y1, x0, y1e, x1e, y1e, 3, 0); /* U+1FB46: '🭆' */
++		else
++			be_drawwedge(ssbuf, buf, idx++, x0, y1, x0, y1e, x1e, y1, 1, 0);   /* U+1FB5C: '🭜' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y2, x1, y2e, x1e, y2e, 0, invert);    /* U+1FB47: '🭇', U+1FB5D: '🭝' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y2, x0, y2e, x1e, y2e, 0, invert);    /* U+1FB48: '🭈', U+1FB5E: '🭞' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y1, x1, y2e, x1e, y2e, 0, invert);    /* U+1FB49: '🭉', U+1FB5F: '🭟' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y1, x0, y2e, x1e, y2e, 0, invert);    /* U+1FB4A: '🭊', U+1FB60: '🭠' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y0, x1, y2e, x1e, y2e, 0, invert);    /* U+1FB4B: '🭋', U+1FB61: '🭡' */
++		be_drawwedge(ssbuf, buf, idx++, x1, y0, x1e, y0, x1e, y0e, 0, invert ^ 1); /* U+1FB4C: '🭌', U+1FB62: '🭢' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x1e, y0, x1e, y0e, 0, invert ^ 1); /* U+1FB4D: '🭍', U+1FB63: '🭣' */
++		be_drawwedge(ssbuf, buf, idx++, x1, y0, x1e, y0, x1e, y1e, 0, invert ^ 1); /* U+1FB4E: '🭎', U+1FB64: '🭤' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x1e, y0, x1e, y1e, 0, invert ^ 1); /* U+1FB4F: '🭏', U+1FB65: '🭥' */
++		be_drawwedge(ssbuf, buf, idx++, x1, y0, x1e, y2e, x1e, y0, 0, invert ^ 1); /* U+1FB50: '🭐', U+1FB66: '🭦' */
++		if (i == 0)
++			be_drawwedge(ssbuf, buf, idx++, x0, y1, x0, y1e, x1e, y1e, 3, 0);  /* U+1FB51: '🭑' */
++		else
++			be_drawwedge(ssbuf, buf, idx++, x0, y1, x1e, y1e, x1e, y1, 1, 0);  /* U+1FB67: '🭧' */
++	}
++	for (invert = 1, i = 0; i < 2; i++, invert ^= 1) {
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x0, y2e, x1, cy, 0, invert);       /* U+1FB68: '🭨', U+1FB6C: '🭬' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y0, x1, cy, x1e, y0, 0, invert);       /* U+1FB69: '🭩', U+1FB6D: '🭭' */
++		be_drawwedge(ssbuf, buf, idx++, x1e, y0, x1, cy, x1e, y2e, 0, invert);     /* U+1FB6A: '🭪', U+1FB6E: '🭮' */
++		be_drawwedge(ssbuf, buf, idx++, x0, y2e, x1, cy, x1e, y2e, 0, invert);     /* U+1FB6B: '🭫', U+1FB6F: '🭯' */
++	}
++
++	/* U+1FB9A: '🮚' */
++	bd_drawrect(ssbuf, 0, 0, 0, ssbuf->cw, ssbuf->ch, 0);
++	bd_drawtriangle(ssbuf, 0, x0, y0, x1, cy, x1e, y0, 255);
++	bd_drawtriangle(ssbuf, 0, x0, y2e, x1, cy, x1e, y2e, 255);
++	bd_downsample(buf, idx + 42, ssbuf, 0, 1);
++
++	/* U+1FB9B: '🮛' */
++	bd_drawrect(ssbuf, 0, 0, 0, ssbuf->cw, ssbuf->ch, 0);
++	bd_drawtriangle(ssbuf, 0, x0, y0, x0, y2e, x1, cy, 255);
++	bd_drawtriangle(ssbuf, 0, x1e, y0, x1, cy, x1e, y2e, 255);
++	bd_downsample(buf, idx + 43, ssbuf, 0, 1);
++
++	return idx;
++}
++
++void
++be_drawwedge(BDBuffer *ssbuf, BDBuffer *buf, int idx, int x1, int y1, int x2, int y2, int x3, int y3, int block, int invert)
++{
++	bd_drawrect(ssbuf, 0, 0, 0, ssbuf->cw, ssbuf->ch, invert ? 255 : 0);
++	bd_drawtriangle(ssbuf, 0, x1, y1, x2, y2, x3, y3, invert ? 0 : 255);
++	if (block) {
++		y1 = ssbuf->ch * (block - 1) / 3;
++		y2 = ssbuf->ch * block / 3;
++		bd_drawrect(ssbuf, 0, 0, y1, ssbuf->cw, y2 - y1, invert ? 0 : 255);
++	}
++	bd_downsample(buf, idx, ssbuf, 0, 1);
++}
++
++int
++be_draw_vertical_one_eighth_blocks(BDBuffer *buf, int idx)
++{
++	int i;
++
++	/* U+1FB70..U+1FB75: '🭰', '🭱', '🭲', '🭳', '🭴', '🭵' */
++	for (i = 1; i < 7; i++)
++		bd_drawrect(buf, idx++, DIV(buf->cw * i, 8), 0, buf->lw, buf->ch, 255);
++
++	return idx;
++}
++
++int
++be_draw_horizontal_one_eighth_blocks(BDBuffer *buf, int idx)
++{
++	int i, lh = MAX(buf->ch / 8, 1);
++
++	/* U+1FB76..U+1FB7B: '🭶', '🭷', '🭸', '🭹', '🭺', '🭻' */
++	for (i = 1; i < 7; i++)
++		bd_drawrect(buf, idx++, 0, DIV(buf->ch * i, 8), buf->cw, lh, 255);
++
++	return idx;
++}
++
++int
++be_draw_one_eighth_frames(BDBuffer *buf, int idx)
++{
++	int cw = buf->cw, ch = buf->ch, lw = buf->lw, lh = MAX(ch / 8, 1);
++
++	/* U+1FB7C: '🭼' */
++	bd_drawrect(buf, idx, 0, 0, lw, ch, 255);
++	bd_drawrect(buf, idx++, 0, ch - lh, cw, lh, 255);
++
++	/* U+1FB7D: '🭽' */
++	bd_drawrect(buf, idx, 0, 0, lw, ch, 255);
++	bd_drawrect(buf, idx++, 0, 0, cw, lh, 255);
++
++	/* U+1FB7E: '🭾' */
++	bd_drawrect(buf, idx, cw - lw, 0, lw, ch, 255);
++	bd_drawrect(buf, idx++, 0, 0, cw, lh, 255);
++
++	/* U+1FB7F: '🭿' */
++	bd_drawrect(buf, idx, cw - lw, 0, lw, ch, 255);
++	bd_drawrect(buf, idx++, 0, ch - lh, cw, lh, 255);
++
++	/* U+1FB80: '🮀' */
++	bd_drawrect(buf, idx, 0, 0, cw, lh, 255);
++	bd_drawrect(buf, idx++, 0, ch - lh, cw, lh, 255);
++
++	return idx;
++}
++
++int
++be_draw_horizontal_one_eighth_block_1358(BDBuffer *buf, int idx)
++{
++	int i, cw = buf->cw, ch = buf->ch, lh = MAX(ch / 8, 1);
++
++	/* U+1FB81: '🮁' */
++	for (i = 0; i < 5; i += 2)
++		bd_drawrect(buf, idx, 0, DIV((ch - lh) * i, 8), cw, lh, 255);
++	bd_drawrect(buf, idx++, 0, ch - lh, cw, lh, 255);
++
++	return idx;
++}
++
++int
++be_draw_upper_one_eighth_blocks(BDBuffer *buf, int idx)
++{
++	int i, cw = buf->cw, ch = buf->ch;
++
++	/* U+1FB82..U+1FB86: '🮂', '🮃', '🮄', '🮅', '🮆' */
++	for (i = 2; i < 8; i++) {
++		if (i != 4)
++			bd_drawrect(buf, idx++, 0, 0, cw, DIV(ch * i, 8), 255);
++	}
++
++	return idx;
++}
++
++int
++be_draw_right_one_eighth_blocks(BDBuffer *buf, int idx)
++{
++	int i, cw = buf->cw, ch = buf->ch;
++
++	/* U+1FB87..U+1FB8B: '🮇', '🮈', '🮉', '🮊', '🮋' */
++	for (i = 2; i < 8; i++) {
++		if (i != 4)
++			bd_drawrect(buf, idx++, cw - DIV(cw * i, 8), 0, DIV(cw * i, 8), ch, 255);
++	}
++
++	return idx;
++}
++
++int
++be_draw_medium_shades(BDBuffer *buf, int idx)
++{
++	int cw = buf->cw, ch = buf->ch, w2 = DIV(cw, 2), h2 = DIV(ch, 2);
++
++	/* U+1FB8C: '🮌' */
++	bd_drawrect(buf, idx++, 0, 0, w2, ch, 128);
++
++	/* U+1FB8D: '🮍' */
++	bd_drawrect(buf, idx++, w2, 0, cw - w2, ch, 128);
++
++	/* U+1FB8E: '🮎' */
++	bd_drawrect(buf, idx++, 0, 0, cw, h2, 128);
++
++	/* U+1FB8F: '🮏' */
++	bd_drawrect(buf, idx++, 0, h2, cw, ch - h2, 128);
++
++	/* U+1FB90: '🮐' */
++	bd_drawrect(buf, idx++, 0, 0, cw, ch, 128);
++
++	/* U+1FB91: '🮑' */
++	bd_drawrect(buf, idx, 0, 0, cw, h2, 255);
++	bd_drawrect(buf, idx++, 0, h2, cw, ch - h2, 128);
++
++	/* U+1FB92: '🮒' */
++	bd_drawrect(buf, idx, 0, 0, cw, h2, 128);
++	bd_drawrect(buf, idx++, 0, h2, cw, ch - h2, 255);
++
++	/* U+1FB93 - reserved */
++	idx++;
++
++	/* U+1FB94: '🮔' */
++	bd_drawrect(buf, idx, 0, 0, w2, ch, 128);
++	bd_drawrect(buf, idx++, w2, 0, cw - w2, ch, 255);
++
++	return idx;
++}
++
++int
++be_draw_checker_board_fill(BDBuffer *ssbuf, BDBuffer *buf, int idx)
++{
++	int i, j, x1, x2, y1, y2;
++
++	/* U+1FB95: '🮕' */
++	bd_erasesymbol(ssbuf, 0);
++	for (j = 0; j < 4; j++) {
++		for (i = 0; i < 4; i += 2) {
++			x1 = ssbuf->cw * (i + (j & 1)) / 4;
++			x2 = ssbuf->cw * (i + (j & 1) + 1) / 4;
++			y1 = ssbuf->ch * j / 4;
++			y2 = ssbuf->ch * (j + 1) / 4;
++			bd_drawrect(ssbuf, 0, x1, y1, x2 - x1, y2 - y1, 255);
++		}
++	}
++	bd_downsample(buf, idx, ssbuf, 0, 1);
++
++	/* U+1FB96: '🮖' */
++	bd_copysymbol(buf, idx+1, idx, 1);
++
++	return idx + 2;
++}
++
++int
++be_draw_heavy_horizontal_fill(BDBuffer *buf, int idx)
++{
++	/* U+1FB97: '🮗' (same as U+1CDB7) */
++	bd_copysymbol(buf, idx, BE_OCTANTS_IDX + 183, 0);
++
++	return idx + 1;
++}
++
++int
++be_draw_diagonal_fill(BDBuffer *ssbuf, BDBuffer *buf, int idx)
++{
++	int i, j, x1, x2, stripes = 8;
++	double x, len, dx = ssbuf->cw / (double)ssbuf->ch;
++
++	if (buf->cw < 12)
++		stripes = 4;
++	else if (buf->cw < 16)
++		stripes = 6;
++
++	/* U+1FB98: '🮘' */
++	bd_erasesymbol(ssbuf, 0);
++	for (j = 0; j < stripes; j += 2) {
++		x = ssbuf->cw * j / stripes;
++		len = ssbuf->cw * (j + 1) / stripes - x;
++		for (i = 0; i < ssbuf->ch; i++) {
++			x1 = (x < 0) ? ssbuf->cw - x : x;
++			x2 = x1 + len;
++			bd_drawrect(ssbuf, 0, x1, i, MIN(x2, ssbuf->cw) - x1, 1, 255);
++			if (x2 > ssbuf->cw)
++				bd_drawrect(ssbuf, 0, 0, i, x2 - ssbuf->cw, 1, 255);
++			if ((x += dx) >= ssbuf->cw)
++				x -= ssbuf->cw;
++		}
++	}
++	bd_downsample(buf, idx, ssbuf, 0, 1);
++
++	/* U+1FB99: '🮙' */
++	bd_copysymbol(buf, idx+1, idx, 1);
++
++	return idx + 2;
++}
++
++int
++be_draw_triangular_medium_shades(BDBuffer *ssbuf, BDBuffer *buf, int idx)
++{
++	int cw = ssbuf->cw, ch = ssbuf->ch;
++
++	/* U+1FB9C: '🮜' */
++	bd_erasesymbol(ssbuf, 0);
++	bd_drawtriangle(ssbuf, 0, 0, 0, 0, ch-1, cw-1, 0, 128);
++	bd_downsample(buf, idx++, ssbuf, 0, 1);
++
++	/* U+1FB9D: '🮝' */
++	bd_erasesymbol(ssbuf, 0);
++	bd_drawtriangle(ssbuf, 0, 0, 0, cw-1, ch-1, cw-1, 0, 128);
++	bd_downsample(buf, idx++, ssbuf, 0, 1);
++
++	/* U+1FB9E: '🮞' */
++	bd_erasesymbol(ssbuf, 0);
++	bd_drawtriangle(ssbuf, 0, cw-1, 0, 0, ch-1, cw-1, ch-1, 128);
++	bd_downsample(buf, idx++, ssbuf, 0, 1);
++
++	/* U+1FB9F: '🮟' */
++	bd_erasesymbol(ssbuf, 0);
++	bd_drawtriangle(ssbuf, 0, 0, 0, 0, ch-1, cw-1, ch-1, 128);
++	bd_downsample(buf, idx++, ssbuf, 0, 1);
++
++	return idx;
++}
++
++int
++be_draw_left_thirds_blocks(BDBuffer *buf, int idx)
++{
++	/* U+1FBCE: '🯎' */
++	bd_drawrect(buf, idx++, 0, 0, DIV(buf->cw * 2, 3), buf->ch, 255);
++
++	/* U+1FBCF '🯏' */
++	bd_drawrect(buf, idx++, 0, 0, DIV(buf->cw * 1, 3), buf->ch, 255);
++
++	return idx;
++}
++
++int
++be_draw_one_quarter_blocks(BDBuffer *buf, int idx)
++{
++	int cw = buf->cw, ch = buf->ch, w2 = DIV(cw, 2), h2 = DIV(ch, 2);
++	int cx = DIV(buf->cw - w2, 2), cy = DIV(buf->ch - h2, 2);
++
++	/* U+1FBE4: '🯤' */
++	bd_drawrect(buf, idx++, cx, 0, w2, h2, 255);
++
++	/* U+1FBE5: '🯥' */
++	bd_drawrect(buf, idx++, cx, h2, w2, ch - h2, 255);
++
++	/* U+1FBE6: '🯦' */
++	bd_drawrect(buf, idx++, 0, cy, w2, h2, 255);
++
++	/* U+1FBE7: '🯧' */
++	bd_drawrect(buf, idx++, cw - w2, cy, w2, h2, 255);
++
++	return idx;
++}
+diff --git a/boxdraw_extra.h b/boxdraw_extra.h
+new file mode 100644
+index 0000000..0a5229a
+--- /dev/null
++++ b/boxdraw_extra.h
+@@ -0,0 +1,423 @@
++/**
++ * Data for boxdraw_extra.
++ */
++
++void drawextrasymbol(int x, int y, int w, int h, XftColor *fg, ushort symbol, int bold);
++void initextrasymbols(void);
++
++/* Box draw category (see boxdraw.h): */
++#define BDE (8<<10)  /* Box extra */
++
++/* Lower byte of U+2500 */
++#define BE_HDASH3        0x04
++#define BE_HDASH3_HEAVY  0x05
++#define BE_VDASH3        0x06
++#define BE_VDASH3_HEAVY  0x07
++#define BE_HDASH4        0x08
++#define BE_HDASH4_HEAVY  0x09
++#define BE_VDASH4        0x0A
++#define BE_VDASH4_HEAVY  0x0B
++#define BE_HDASH2        0x4C
++#define BE_HDASH2_HEAVY  0x4D
++#define BE_VDASH2        0x4E
++#define BE_VDASH2_HEAVY  0x4F
++#define BE_ARC_DR        0x6D
++#define BE_ARC_DL        0x6E
++#define BE_ARC_UL        0x6F
++#define BE_ARC_UR        0x70
++#define BE_DIAG_RL       0x71
++#define BE_DIAG_LR       0x72
++#define BE_DIAG_CROSS    0x73
++
++/* Number of misc characters (dashes/diagonals/rounded corners) plus one */
++#define BE_MISC_LEN     (19+1)
++
++/* Number of sextant characters */
++#define BE_SEXTANTS_LEN  60
++
++/* Number of wedges (U+1FB3C..U+1FB6F and U+1FB9A..U+1FB9B) */
++#define BE_WEDGES_LEN  54
++
++/* Index and number of legacy characters */
++#define BE_LEGACY_IDX  BE_MISC_LEN
++#define BE_LEGACY_LEN  (BE_SEXTANTS_LEN + BE_WEDGES_LEN + 52)
++
++/* Index and number of octant characters */
++#define BE_OCTANTS_IDX  (BE_LEGACY_IDX + BE_LEGACY_LEN)
++#define BE_OCTANTS_LEN  230
++
++/* Total number of extra characters */
++#define BE_EXTRA_LEN  (BE_MISC_LEN + BE_LEGACY_LEN + BE_OCTANTS_LEN)
++
++/**
++ * The order of misc characters in the mask picture. The first character starts
++ * at position one, because in this table zero means that the character is not
++ * implemented.
++ */
++static const uchar boxmisc[256] = {
++	[BE_HDASH3]       = 1,
++	[BE_HDASH3_HEAVY] = 2,
++	[BE_VDASH3]       = 3,
++	[BE_VDASH3_HEAVY] = 4,
++	[BE_HDASH4]       = 5,
++	[BE_HDASH4_HEAVY] = 6,
++	[BE_VDASH4]       = 7,
++	[BE_VDASH4_HEAVY] = 8,
++	[BE_HDASH2]       = 9,
++	[BE_HDASH2_HEAVY] = 10,
++	[BE_VDASH2]       = 11,
++	[BE_VDASH2_HEAVY] = 12,
++	[BE_ARC_DR]       = 13,
++	[BE_ARC_DL]       = 14,
++	[BE_ARC_UL]       = 15,
++	[BE_ARC_UR]       = 16,
++	[BE_DIAG_RL]      = 17,
++	[BE_DIAG_LR]      = 18,
++	[BE_DIAG_CROSS]   = 19
++};
++
++/**
++ * The order of legacy characters in the mask picture.
++ * (BE_LEGACY_IDX-1 must be added to the values when reading the array)
++ */
++uchar boxlegacy[256];
++
++#define BLK1  (1 << 0)
++#define BLK2  (1 << 1)
++#define BLK3  (1 << 2)
++#define BLK4  (1 << 3)
++#define BLK5  (1 << 4)
++#define BLK6  (1 << 5)
++#define BLK7  (1 << 6)
++#define BLK8  (1 << 7)
++
++/**
++ * Sextants: U+1FB00 .. U+1FB3B
++ * Blocks:   +---+---+
++ *           | 1 | 2 |
++ *           +---+---+
++ *           | 3 | 4 |
++ *           +---+---+
++ *           | 5 | 6 |
++ *           +---+---+
++ */
++static uchar boxdatasextants[BE_SEXTANTS_LEN] = {
++	BLK1,
++	BLK2,
++	BLK1 | BLK2,
++	BLK3,
++	BLK1 | BLK3,
++	BLK2 | BLK3,
++	BLK1 | BLK2 | BLK3,
++	BLK4,
++	BLK1 | BLK4,
++	BLK2 | BLK4,
++	BLK1 | BLK2 | BLK4,
++	BLK3 | BLK4,
++	BLK1 | BLK3 | BLK4,
++	BLK2 | BLK3 | BLK4,
++	BLK1 | BLK2 | BLK3 | BLK4,
++	BLK5,
++	BLK1 | BLK5,
++	BLK2 | BLK5,
++	BLK1 | BLK2 | BLK5,
++	BLK3 | BLK5,
++	BLK2 | BLK3 | BLK5,
++	BLK1 | BLK2 | BLK3 | BLK5,
++	BLK4 | BLK5,
++	BLK1 | BLK4 | BLK5,
++	BLK2 | BLK4 | BLK5,
++	BLK1 | BLK2 | BLK4 | BLK5,
++	BLK3 | BLK4 | BLK5,
++	BLK1 | BLK3 | BLK4 | BLK5,
++	BLK2 | BLK3 | BLK4 | BLK5,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5,
++	BLK6,
++	BLK1 | BLK6,
++	BLK2 | BLK6,
++	BLK1 | BLK2 | BLK6,
++	BLK3 | BLK6,
++	BLK1 | BLK3 | BLK6,
++	BLK2 | BLK3 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK6,
++	BLK4 | BLK6,
++	BLK1 | BLK4 | BLK6,
++	BLK1 | BLK2 | BLK4 | BLK6,
++	BLK3 | BLK4 | BLK6,
++	BLK1 | BLK3 | BLK4 | BLK6,
++	BLK2 | BLK3 | BLK4 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK6,
++	BLK5 | BLK6,
++	BLK1 | BLK5 | BLK6,
++	BLK2 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK5 | BLK6,
++	BLK3 | BLK5 | BLK6,
++	BLK1 | BLK3 | BLK5 | BLK6,
++	BLK2 | BLK3 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK6,
++	BLK4 | BLK5 | BLK6,
++	BLK1 | BLK4 | BLK5 | BLK6,
++	BLK2 | BLK4 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK6,
++	BLK3 | BLK4 | BLK5 | BLK6,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK6,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK6
++};
++
++/**
++ * Octants: U+1CD00 .. U+1CDE5
++ * Blocks:  +---+---+
++ *          | 1 | 2 |
++ *          +---+---+
++ *          | 3 | 4 |
++ *          +---+---+
++ *          | 5 | 6 |
++ *          +---+---+
++ *          | 7 | 8 |
++ *          +---+---+
++ */
++static uchar boxdataoctants[BE_OCTANTS_LEN] = {
++	/* 00 .. 1F */
++	BLK3,
++	BLK2 | BLK3,
++	BLK1 | BLK2 | BLK3,
++	BLK4,
++	BLK1 | BLK4,
++	BLK1 | BLK2 | BLK4,
++	BLK3 | BLK4,
++	BLK1 | BLK3 | BLK4,
++	BLK2 | BLK3 | BLK4,
++	BLK5,
++	BLK1 | BLK5,
++	BLK2 | BLK5,
++	BLK1 | BLK2 | BLK5,
++	BLK1 | BLK3 | BLK5,
++	BLK2 | BLK3 | BLK5,
++	BLK1 | BLK2 | BLK3 | BLK5,
++	BLK4 | BLK5,
++	BLK1 | BLK4 | BLK5,
++	BLK2 | BLK4 | BLK5,
++	BLK1 | BLK2 | BLK4 | BLK5,
++	BLK3 | BLK4 | BLK5,
++	BLK1 | BLK3 | BLK4 | BLK5,
++	BLK2 | BLK3 | BLK4 | BLK5,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5,
++	BLK6,
++	BLK1 | BLK6,
++	BLK2 | BLK6,
++	BLK1 | BLK2 | BLK6,
++	BLK3 | BLK6,
++	BLK1 | BLK3 | BLK6,
++	BLK2 | BLK3 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK6,
++
++	/* 20 .. 3F */
++	BLK1 | BLK4 | BLK6,
++	BLK2 | BLK4 | BLK6,
++	BLK1 | BLK2 | BLK4 | BLK6,
++	BLK3 | BLK4 | BLK6,
++	BLK1 | BLK3 | BLK4 | BLK6,
++	BLK2 | BLK3 | BLK4 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK6,
++	BLK5 | BLK6,
++	BLK1 | BLK5 | BLK6,
++	BLK2 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK5 | BLK6,
++	BLK3 | BLK5 | BLK6,
++	BLK1 | BLK3 | BLK5 | BLK6,
++	BLK2 | BLK3 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK6,
++	BLK4 | BLK5 | BLK6,
++	BLK1 | BLK4 | BLK5 | BLK6,
++	BLK2 | BLK4 | BLK5 | BLK6,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK6,
++	BLK3 | BLK4 | BLK5 | BLK6,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK6,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK6,
++	BLK1 | BLK7,
++	BLK2 | BLK7,
++	BLK1 | BLK2 | BLK7,
++	BLK3 | BLK7,
++	BLK1 | BLK3 | BLK7,
++	BLK2 | BLK3 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK7,
++	BLK4 | BLK7,
++	BLK1 | BLK4 | BLK7,
++	BLK2 | BLK4 | BLK7,
++
++	/* 40 .. 5F */
++	BLK1 | BLK2 | BLK4 | BLK7,
++	BLK3 | BLK4 | BLK7,
++	BLK1 | BLK3 | BLK4 | BLK7,
++	BLK2 | BLK3 | BLK4 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK7,
++	BLK1 | BLK5 | BLK7,
++	BLK2 | BLK5 | BLK7,
++	BLK1 | BLK2 | BLK5 | BLK7,
++	BLK3 | BLK5 | BLK7,
++	BLK2 | BLK3 | BLK5 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK7,
++	BLK4 | BLK5 | BLK7,
++	BLK1 | BLK4 | BLK5 | BLK7,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK7,
++	BLK3 | BLK4 | BLK5 | BLK7,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK7,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK7,
++	BLK6 | BLK7,
++	BLK1 | BLK6 | BLK7,
++	BLK2 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK6 | BLK7,
++	BLK3 | BLK6 | BLK7,
++	BLK1 | BLK3 | BLK6 | BLK7,
++	BLK2 | BLK3 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK6 | BLK7,
++	BLK4 | BLK6 | BLK7,
++	BLK1 | BLK4 | BLK6 | BLK7,
++	BLK2 | BLK4 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK4 | BLK6 | BLK7,
++	BLK3 | BLK4 | BLK6 | BLK7,
++	BLK1 | BLK3 | BLK4 | BLK6 | BLK7,
++	BLK2 | BLK3 | BLK4 | BLK6 | BLK7,
++
++	/* 60 .. 7F */
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK6 | BLK7,
++	BLK5 | BLK6 | BLK7,
++	BLK1 | BLK5 | BLK6 | BLK7,
++	BLK2 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK5 | BLK6 | BLK7,
++	BLK3 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK3 | BLK5 | BLK6 | BLK7,
++	BLK2 | BLK3 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK6 | BLK7,
++	BLK4 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK2 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK3 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5 | BLK6 | BLK7,
++	BLK1 | BLK8,
++	BLK2 | BLK8,
++	BLK1 | BLK2 | BLK8,
++	BLK3 | BLK8,
++	BLK1 | BLK3 | BLK8,
++	BLK2 | BLK3 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK8,
++	BLK4 | BLK8,
++	BLK1 | BLK4 | BLK8,
++	BLK2 | BLK4 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK8,
++	BLK3 | BLK4 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK8,
++
++	/* 80 .. 9F */
++	BLK5 | BLK8,
++	BLK1 | BLK5 | BLK8,
++	BLK2 | BLK5 | BLK8,
++	BLK1 | BLK2 | BLK5 | BLK8,
++	BLK3 | BLK5 | BLK8,
++	BLK1 | BLK3 | BLK5 | BLK8,
++	BLK2 | BLK3 | BLK5 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK8,
++	BLK4 | BLK5 | BLK8,
++	BLK1 | BLK4 | BLK5 | BLK8,
++	BLK2 | BLK4 | BLK5 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK8,
++	BLK3 | BLK4 | BLK5 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5 | BLK8,
++	BLK1 | BLK6 | BLK8,
++	BLK2 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK6 | BLK8,
++	BLK3 | BLK6 | BLK8,
++	BLK2 | BLK3 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK6 | BLK8,
++	BLK4 | BLK6 | BLK8,
++	BLK1 | BLK4 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK6 | BLK8,
++	BLK3 | BLK4 | BLK6 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK6 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK6 | BLK8,
++	BLK5 | BLK6 | BLK8,
++	BLK1 | BLK5 | BLK6 | BLK8,
++	BLK2 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK5 | BLK6 | BLK8,
++
++	/* A0 .. BF */
++	BLK3 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK3 | BLK5 | BLK6 | BLK8,
++	BLK2 | BLK3 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK6 | BLK8,
++	BLK4 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK2 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK3 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5 | BLK6 | BLK8,
++	BLK1 | BLK7 | BLK8,
++	BLK2 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK7 | BLK8,
++	BLK3 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK7 | BLK8,
++	BLK4 | BLK7 | BLK8,
++	BLK1 | BLK4 | BLK7 | BLK8,
++	BLK2 | BLK4 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK7 | BLK8,
++	BLK3 | BLK4 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK7 | BLK8,
++	BLK5 | BLK7 | BLK8,
++	BLK1 | BLK5 | BLK7 | BLK8,
++	BLK2 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK5 | BLK7 | BLK8,
++	BLK3 | BLK5 | BLK7 | BLK8,
++
++	/* C0 .. E5 */
++	BLK1 | BLK3 | BLK5 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK7 | BLK8,
++	BLK4 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK2 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK3 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK5 | BLK7 | BLK8,
++	BLK6 | BLK7 | BLK8,
++	BLK1 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK6 | BLK7 | BLK8,
++	BLK3 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK6 | BLK7 | BLK8,
++	BLK4 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK3 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK4 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK3 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK3 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK4 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK4 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK2 | BLK4 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK1 | BLK3 | BLK4 | BLK5 | BLK6 | BLK7 | BLK8,
++	BLK2 | BLK3 | BLK4 | BLK5 | BLK6 | BLK7 | BLK8
++};
+diff --git a/config.def.h b/config.def.h
+index 2cd740a..94ee195 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -67,6 +67,28 @@ static unsigned int blinktimeout = 800;
+  */
+ static unsigned int cursorthickness = 2;
+ 
++/*
++ * 1: render most of the lines/blocks characters without using the font for
++ *    perfect alignment between cells (U2500 - U259F except dashes/diagonals).
++ *    Bold affects lines thickness if boxdraw_bold is not 0. Italic is ignored.
++ * 0: disable (render all U25XX glyphs normally from the font).
++ */
++const int boxdraw = 0;
++const int boxdraw_bold = 0;
++
++/* braille (U28XX):  1: render as adjacent "pixels",  0: use font */
++const int boxdraw_braille = 0;
++
++/* extra: if enabled, render dashes, diagonals, sextants, octants and proper
++ *        rounded corners. (boxdraw has to be enabled as well) */
++int boxdraw_extra = 1;
++
++/* branch symbols (UF5D0..U+F60D). Ref. https://github.com/kovidgoyal/kitty/pull/7681 */
++int boxdraw_branch = 1;
++
++/* line thickness of the branch symbols in pixels (0 = auto) */
++int boxdraw_branch_thickness = 0;
++
+ /*
+  * bell volume. It must be a value between -100 and 100. Use 0 for disabling
+  * it
+diff --git a/config.mk b/config.mk
+index 2fc854e..6031f7e 100644
+--- a/config.mk
++++ b/config.mk
+@@ -12,11 +12,13 @@ X11LIB = /usr/X11R6/lib
+ 
+ PKG_CONFIG = pkg-config
+ 
++XRENDER = -lXrender
++
+ # includes and libs
+ INCS = -I$(X11INC) \
+        `$(PKG_CONFIG) --cflags fontconfig` \
+        `$(PKG_CONFIG) --cflags freetype2`
+-LIBS = -L$(X11LIB) -lm -lrt -lX11 -lutil -lXft \
++LIBS = -L$(X11LIB) -lm -lrt -lX11 -lutil -lXft ${XRENDER} \
+        `$(PKG_CONFIG) --libs fontconfig` \
+        `$(PKG_CONFIG) --libs freetype2`
+ 
+diff --git a/st.c b/st.c
+index 8e57991..bdd3cd1 100644
+--- a/st.c
++++ b/st.c
+@@ -1218,6 +1218,9 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
+ 	term.dirty[y] = 1;
+ 	term.line[y][x] = *attr;
+ 	term.line[y][x].u = u;
++
++	if (isboxdraw(u))
++		term.line[y][x].mode |= ATTR_BOXDRAW;
+ }
+ 
+ void
+diff --git a/st.h b/st.h
+index fd3b0d8..77b0bea 100644
+--- a/st.h
++++ b/st.h
+@@ -2,6 +2,8 @@
+ 
+ #include <stdint.h>
+ #include <sys/types.h>
++#include <X11/Xlib.h>
++#include <X11/Xft/Xft.h>
+ 
+ /* macros */
+ #define MIN(a, b)		((a) < (b) ? (a) : (b))
+@@ -20,6 +22,10 @@
+ #define TRUECOLOR(r,g,b)	(1 << 24 | (r) << 16 | (g) << 8 | (b))
+ #define IS_TRUECOL(x)		(1 << 24 & (x))
+ 
++typedef XftDraw *Draw;
++typedef XftColor Color;
++typedef XftGlyphFontSpec GlyphFontSpec;
++
+ enum glyph_attribute {
+ 	ATTR_NULL       = 0,
+ 	ATTR_BOLD       = 1 << 0,
+@@ -33,6 +39,7 @@ enum glyph_attribute {
+ 	ATTR_WRAP       = 1 << 8,
+ 	ATTR_WIDE       = 1 << 9,
+ 	ATTR_WDUMMY     = 1 << 10,
++	ATTR_BOXDRAW    = 1 << 11,
+ 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
+ };
+ 
+@@ -77,6 +84,38 @@ typedef union {
+ 	const char *s;
+ } Arg;
+ 
++/* Purely graphic info */
++typedef struct {
++	int tw, th; /* tty width and height */
++	int w, h; /* window width and height */
++	int ch; /* char height */
++	int cw; /* char width  */
++	int mode; /* window state/mode flags */
++	int cursor; /* cursor style */
++} TermWindow;
++
++typedef struct {
++	Display *dpy;
++	Colormap cmap;
++	Window win;
++	Drawable buf;
++	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
++	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
++	struct {
++		XIM xim;
++		XIC xic;
++		XPoint spot;
++		XVaNestedList spotlist;
++	} ime;
++	Draw draw;
++	Visual *vis;
++	XSetWindowAttributes attrs;
++	int scr;
++	int isfixed; /* is fixed geometry? */
++	int l, t; /* left and top offset */
++	int gm; /* geometry mask */
++} XWindow;
++
+ void die(const char *, ...);
+ void redraw(void);
+ void draw(void);
+@@ -111,6 +150,14 @@ void *xmalloc(size_t);
+ void *xrealloc(void *, size_t);
+ char *xstrdup(const char *);
+ 
++int isboxdraw(Rune);
++ushort boxdrawindex(const Glyph *);
++#ifdef XFT_VERSION
++/* only exposed to x.c, otherwise we'll need Xft.h for the types */
++void boxdraw_xinit(Display *, Colormap, XftDraw *, Visual *);
++void drawboxes(int, int, int, int, XftColor *, XftColor *, const XftGlyphFontSpec *, int);
++#endif
++
+ /* config.h globals */
+ extern char *utmp;
+ extern char *scroll;
+@@ -124,3 +171,4 @@ extern unsigned int tabspaces;
+ extern unsigned int defaultfg;
+ extern unsigned int defaultbg;
+ extern unsigned int defaultcs;
++extern const int boxdraw, boxdraw_bold, boxdraw_braille;
+diff --git a/x.c b/x.c
+index d73152b..728cb9c 100644
+--- a/x.c
++++ b/x.c
+@@ -73,42 +73,6 @@ static void ttysend(const Arg *);
+ #define TRUEGREEN(x)		(((x) & 0xff00))
+ #define TRUEBLUE(x)		(((x) & 0xff) << 8)
+ 
+-typedef XftDraw *Draw;
+-typedef XftColor Color;
+-typedef XftGlyphFontSpec GlyphFontSpec;
+-
+-/* Purely graphic info */
+-typedef struct {
+-	int tw, th; /* tty width and height */
+-	int w, h; /* window width and height */
+-	int ch; /* char height */
+-	int cw; /* char width  */
+-	int mode; /* window state/mode flags */
+-	int cursor; /* cursor style */
+-} TermWindow;
+-
+-typedef struct {
+-	Display *dpy;
+-	Colormap cmap;
+-	Window win;
+-	Drawable buf;
+-	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
+-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
+-	struct {
+-		XIM xim;
+-		XIC xic;
+-		XPoint spot;
+-		XVaNestedList spotlist;
+-	} ime;
+-	Draw draw;
+-	Visual *vis;
+-	XSetWindowAttributes attrs;
+-	int scr;
+-	int isfixed; /* is fixed geometry? */
+-	int l, t; /* left and top offset */
+-	int gm; /* geometry mask */
+-} XWindow;
+-
+ typedef struct {
+ 	Atom xtarget;
+ 	char *primary, *clipboard;
+@@ -217,9 +181,9 @@ static void (*handler[LASTEvent])(XEvent *) = {
+ 
+ /* Globals */
+ static DC dc;
+-static XWindow xw;
++XWindow xw;
+ static XSelection xsel;
+-static TermWindow win;
++TermWindow win;
+ 
+ /* Font Ring Cache */
+ enum {
+@@ -1240,6 +1204,8 @@ xinit(int cols, int rows)
+ 	xsel.xtarget = XInternAtom(xw.dpy, "UTF8_STRING", 0);
+ 	if (xsel.xtarget == None)
+ 		xsel.xtarget = XA_STRING;
++
++	boxdraw_xinit(xw.dpy, xw.cmap, xw.draw, xw.vis);
+ }
+ 
+ int
+@@ -1286,8 +1252,13 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
+ 			yp = winy + font->ascent;
+ 		}
+ 
+-		/* Lookup character index with default font. */
+-		glyphidx = XftCharIndex(xw.dpy, font->match, rune);
++		if (mode & ATTR_BOXDRAW) {
++			/* minor shoehorning: boxdraw uses only this ushort */
++			glyphidx = boxdrawindex(&glyphs[i]);
++		} else {
++			/* Lookup character index with default font. */
++			glyphidx = XftCharIndex(xw.dpy, font->match, rune);
++		}
+ 		if (glyphidx) {
+ 			specs[numspecs].font = font->match;
+ 			specs[numspecs].glyph = glyphidx;
+@@ -1491,8 +1462,12 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
+ 	r.width = width;
+ 	XftDrawSetClipRectangles(xw.draw, winx, winy, &r, 1);
+ 
+-	/* Render the glyphs. */
+-	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
++	if (base.mode & ATTR_BOXDRAW) {
++		drawboxes(winx, winy, width / len, win.ch, fg, bg, specs, len);
++	} else {
++		/* Render the glyphs. */
++		XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
++	}
+ 
+ 	/* Render underline and strikethrough. */
+ 	if (base.mode & ATTR_UNDERLINE) {
+@@ -1535,7 +1510,7 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
+ 	/*
+ 	 * Select the right color for the right mode.
+ 	 */
+-	g.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE;
++	g.mode &= ATTR_BOLD|ATTR_ITALIC|ATTR_UNDERLINE|ATTR_STRUCK|ATTR_WIDE|ATTR_BOXDRAW;
+ 
+ 	if (IS_SET(MODE_REVERSE)) {
+ 		g.mode |= ATTR_REVERSE;

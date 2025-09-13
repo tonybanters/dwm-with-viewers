@@ -17,7 +17,7 @@ config.h:
 
 st.o: config.h st.h win.h
 x.o: arg.h config.h st.h win.h graphics.h hb.h
-boxdraw.o: config.h st.h boxdraw_data.h
+boxdraw.o: config.h st.h boxdraw.h
 hb.o: st.h
 
 $(OBJ): config.h config.mk
