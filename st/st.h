@@ -27,11 +27,6 @@
 // not a 24-bit color because the 25-th bit is not set.
 #define DECOR_DEFAULT_COLOR	0x0ffffff
 
-/* Xft type definitions */
-typedef XftDraw *Draw;
-typedef XftColor Color;
-typedef XftGlyphFontSpec GlyphFontSpec;
-
 enum glyph_attribute {
 	ATTR_NULL       = 0,
 	ATTR_SET        = 1 << 0,
@@ -49,7 +44,7 @@ enum glyph_attribute {
 	ATTR_SELECTED   = 1 << 12,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
 	ATTR_IMAGE      = 1 << 14,
-    ATTR_BOXDRAW    = 1 << 15,
+  ATTR_BOXDRAW    = 1 << 15,
 	ATTR_URL        = 1 << 16,
 };
 
@@ -83,6 +78,9 @@ enum underline_style {
 	UNDERLINE_DASHED = 5,
 };
 
+typedef XftDraw *Draw;
+typedef XftColor Color;
+typedef XftGlyphFontSpec GlyphFontSpec;
 typedef unsigned char uchar;
 typedef unsigned int uint;
 typedef unsigned long ulong;

@@ -5,7 +5,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char *font = "JetBrainsMono Nerd Font:pixelsize=18:antialias=true:autohint=true";
+static char *font = "IosevkaTerm Nerd Font:pixelsize=18:antialias=true:autohint=true";
 /* Spare fonts */
 static char *font2[] = { "NotoColorEmoji:pixelsize=16:antialias=true:autohint=true" };
 /* horizontal & vertical padding */
