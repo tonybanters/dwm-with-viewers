@@ -114,6 +114,7 @@ typedef struct {
 	int hborderpx, vborderpx;
 	int ch; /* char height */
 	int cw; /* char width  */
+    int cyo; /* char y offset */
 	int mode; /* window state/mode flags */
 	int cursor; /* cursor style */
 } TermWindow;
