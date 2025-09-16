@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <X11/Xlib.h>
+#include <X11/Xft/Xft.h>
 
 /* macros */
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -42,7 +44,14 @@ enum glyph_attribute {
 	ATTR_SELECTED   = 1 << 12,
 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
 	ATTR_IMAGE      = 1 << 14,
-    ATTR_BOXDRAW    = 1 << 15,
+  ATTR_BOXDRAW    = 1 << 15,
+	ATTR_URL        = 1 << 16,
+};
+
+enum drawing_mode {
+    DRAW_NONE = 0,
+    DRAW_BG = 1 << 0,
+    DRAW_FG = 1 << 1,
 };
 
 enum selection_mode {
@@ -69,6 +78,9 @@ enum underline_style {
 	UNDERLINE_DASHED = 5,
 };
 
+typedef XftDraw *Draw;
+typedef XftColor Color;
+typedef XftGlyphFontSpec GlyphFontSpec;
 typedef unsigned char uchar;
 typedef unsigned int uint;
 typedef unsigned long ulong;
@@ -94,6 +106,42 @@ typedef union {
 	const void *v;
 	const char *s;
 } Arg;
+
+/* Purely graphic info */
+typedef struct {
+	int tw, th; /* tty width and height */
+	int w, h; /* window width and height */
+	int hborderpx, vborderpx;
+	int ch; /* char height */
+	int cw; /* char width  */
+    int cyo; /* char y offset */
+	int mode; /* window state/mode flags */
+	int cursor; /* cursor style */
+} TermWindow;
+
+typedef struct {
+	Display *dpy;
+	Colormap cmap;
+	Window win;
+	Drawable buf;
+	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
+	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
+	struct {
+		XIM xim;
+		XIC xic;
+		XPoint spot;
+		XVaNestedList spotlist;
+	} ime;
+	Draw draw;
+	Visual *vis;
+	XSetWindowAttributes attrs;
+	int scr;
+	int isfixed; /* is fixed geometry? */
+	int depth; /* bit depth */
+	int l, t; /* left and top offset */
+	int gm; /* geometry mask */
+} XWindow;
+
 
 void die(const char *, ...);
 void redraw(void);
@@ -129,6 +177,10 @@ char *getsel(void);
 
 Glyph getglyphat(int, int);
 
+void highlighturlsline(int);
+void unhighlighturlsline(int);
+int followurl(int, int);
+
 size_t utf8encode(Rune, char *);
 
 void *xmalloc(size_t);
@@ -157,6 +209,11 @@ extern unsigned int defaultfg;
 extern unsigned int defaultbg;
 extern unsigned int defaultcs;
 extern const int boxdraw, boxdraw_bold, boxdraw_braille;
+extern float alpha_def;
+extern char *urlhandler;
+extern char urlchars[];
+extern char *urlprefixes[];
+extern int nurlprefixes;
 
 // Accessors to decoration properties stored in `decor`.
 // The 25-th bit is used to indicate if it's a 24-bit color.
